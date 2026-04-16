@@ -36,6 +36,14 @@ DEFAULT_USERS = [
         "created_at": "2026-03-12 08:00",
     },
     {
+        "id": "user-admin-002",
+        "email": "23-78520@g.batstate-u.edu.ph",
+        "full_name": "Lira Angela Ata",
+        "role": "admin",
+        "password": "Ata23-78520",
+        "created_at": "2026-03-12 08:00",
+    },
+    {
         "id": "user-student-001",
         "email": "jhon.boiser@student.edu",
         "full_name": "Jhon Boiser",
@@ -208,36 +216,61 @@ def init_database() -> None:
             )
         else:
             for user in DEFAULT_USERS:
-                result = connection.execute(
-                    """
-                    UPDATE users
-                    SET email = ?, full_name = ?, role = ?, password_hash = ?, created_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        user["email"],
-                        user["full_name"],
-                        user["role"],
-                        generate_password_hash(user["password"]),
-                        user["created_at"],
-                        user["id"],
-                    ),
-                )
-                if result.rowcount == 0:
+                existing_user = connection.execute(
+                    "SELECT id FROM users WHERE id = ?",
+                    (user["id"],),
+                ).fetchone()
+                if existing_user:
                     connection.execute(
                         """
-                        INSERT INTO users (id, email, full_name, role, password_hash, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        UPDATE users
+                        SET email = ?, full_name = ?, role = ?, password_hash = ?, created_at = ?
+                        WHERE id = ?
                         """,
                         (
-                            user["id"],
                             user["email"],
                             user["full_name"],
                             user["role"],
                             generate_password_hash(user["password"]),
                             user["created_at"],
+                            user["id"],
                         ),
                     )
+                else:
+                    existing_email_user = connection.execute(
+                        "SELECT id FROM users WHERE lower(email) = ?",
+                        (user["email"].strip().lower(),),
+                    ).fetchone()
+                    if existing_email_user:
+                        connection.execute(
+                            """
+                            UPDATE users
+                            SET full_name = ?, role = ?, password_hash = ?, created_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                user["full_name"],
+                                user["role"],
+                                generate_password_hash(user["password"]),
+                                user["created_at"],
+                                existing_email_user["id"],
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            INSERT INTO users (id, email, full_name, role, password_hash, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                user["id"],
+                                user["email"],
+                                user["full_name"],
+                                user["role"],
+                                generate_password_hash(user["password"]),
+                                user["created_at"],
+                            ),
+                        )
 
             for removed_user_id in LEGACY_REMOVED_USER_IDS:
                 connection.execute("DELETE FROM users WHERE id = ?", (removed_user_id,))

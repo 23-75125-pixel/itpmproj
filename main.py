@@ -1,9 +1,6 @@
 from pathlib import Path
 import os
 
-from src.app import create_app, socketio
-
-
 def load_dotenv_file() -> None:
     env_path = Path(__file__).resolve().parent / ".env"
     if not env_path.exists():
@@ -22,6 +19,8 @@ def load_dotenv_file() -> None:
 
 
 load_dotenv_file()
+
+from src.app import create_app, socketio
 
 
 app = create_app()
