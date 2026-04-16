@@ -747,12 +747,7 @@ def create_app() -> Flask:
         if role not in {"admin", "user"}:
             role = "user"
         if not _is_google_oauth_configured():
-            user = get_user(role)
-            if not user:
-                return redirect(url_for("login", role=role, error="Google OAuth is not configured, and no local user exists for fallback."))
-            session["role"] = user["role"]
-            session["user_id"] = user["id"]
-            return redirect(url_for("home"))
+            return redirect(url_for("login", role=role, error="Google OAuth is not configured."))
         try:
             return redirect(_authorize_google(role))
         except RuntimeError as exc:
@@ -781,17 +776,21 @@ def create_app() -> Flask:
             return redirect(url_for("login", role=role, error="Your Google account does not match the selected portal."))
 
         if not user:
-            if role == "user":
+            if role == "admin":
                 return redirect(
                     url_for(
                         "login",
                         role=role,
-                        error="This student Google account is not invited yet. Ask your instructor to send an invitation first.",
+                        error="This instructor Google account is not authorized. Only registered instructor accounts can sign in.",
                     )
                 )
-            temporary_password = os.urandom(16).hex()
-            create_user(email, full_name or email, role, temporary_password)
-            user = get_user_by_email(email)
+            return redirect(
+                url_for(
+                    "login",
+                    role=role,
+                    error="This student Google account is not invited yet. Ask your instructor to send an invitation first.",
+                )
+            )
 
         session["role"] = role
         session["user_id"] = user["id"]
