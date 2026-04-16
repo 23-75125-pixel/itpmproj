@@ -43,11 +43,18 @@ from .data import (
     activity_stats,
     build_dashboard_calendar,
     cheating_summary,
+    create_activity_log,
     create_or_update_quiz,
     create_user,
     dashboard_stats,
+    delete_quiz_by_id,
     delete_user_by_email,
+    ensure_quiz_attempt_in_progress,
+    finalize_quiz_attempt,
     format_schedule,
+    get_attempt,
+    get_quiz,
+    get_quiz_by_code,
     get_quizzes,
     get_user,
     get_user_by_email,
@@ -73,9 +80,17 @@ MIN_CONFIDENCE_DETECTION = 0.20
 MIN_FACE_AREA_RATIO = 0.05
 MAX_FACE_AREA_RATIO = 0.60
 CENTER_MARGIN_RATIO = 0.25
+DETECTION_INFER_CONFIDENCE = 0.35
+DETECTION_INFER_IOU = 0.45
+DETECTION_INFER_IMGSZ = 416
+DETECTION_INFER_MAX_DET = 3
+DETECTION_CLASS_NORMAL_MIN_CONF = 0.35
+DETECTION_CLASS_CHEAT_MIN_CONF = 0.60
+DETECTION_CLASS_MARGIN = 0.08
 
 socketio = SocketIO(cors_allowed_origins="*", async_mode="threading") if SocketIO else None
 _monitor_rooms: dict[str, dict[str, dict]] = {}
+_detection_event_cache: dict[str, datetime] = {}
 
 
 def classify_face_detection(
@@ -122,6 +137,21 @@ def create_app() -> Flask:
         socketio.init_app(app, manage_session=False)
 
     detection_model = None
+
+    def _should_log_detection_event(attempt_id: str, event_key: str, cooldown_seconds: int = 8) -> bool:
+        cache_key = f"{attempt_id}:{event_key}"
+        now = datetime.now()
+        previous = _detection_event_cache.get(cache_key)
+        if previous and (now - previous).total_seconds() < cooldown_seconds:
+            return False
+        _detection_event_cache[cache_key] = now
+
+        if len(_detection_event_cache) > 400:
+            cutoff = now - timedelta(minutes=10)
+            stale_keys = [key for key, value in _detection_event_cache.items() if value < cutoff]
+            for key in stale_keys:
+                _detection_event_cache.pop(key, None)
+        return True
 
     def get_detection_model():
         nonlocal detection_model
@@ -1093,6 +1123,33 @@ def create_app() -> Flask:
         live_quiz = get_quiz(live_quiz_id) if live_quiz_id else None
         live_logs = quiz_flags(live_quiz["id"]) if live_quiz else []
         live_students = [attempt for attempt in quiz_attempts(live_quiz["id"]) if attempt["status"] == "in_progress"] if live_quiz else []
+        latest_detection_by_attempt: dict[str, dict] = {}
+        for flag in live_logs:
+            attempt_id = str(flag.get("attempt_id", "")).strip()
+            if not attempt_id or attempt_id in latest_detection_by_attempt:
+                continue
+            latest_detection_by_attempt[attempt_id] = {
+                "event": flag.get("event_type", ""),
+                "description": flag.get("event_description", ""),
+                "flag_level": flag.get("flag_level", "low"),
+                "timestamp": flag.get("timestamp", ""),
+            }
+
+        live_student_rows = []
+        for attempt in live_students:
+            latest = latest_detection_by_attempt.get(attempt.get("id", ""), {})
+            live_student_rows.append(
+                {
+                    "attempt_id": attempt.get("id", ""),
+                    "student_name": attempt.get("student_name", "Student"),
+                    "student_email": attempt.get("student_email", ""),
+                    "camera_on": False,
+                    "detection_status": latest.get("description") or "No detection yet",
+                    "flag_level": latest.get("flag_level", "low"),
+                    "updated_at": latest.get("timestamp") or attempt.get("started_at", ""),
+                }
+            )
+
         return render_template(
             "activity_monitor.html",
             stats=activity_stats(),
@@ -1108,6 +1165,7 @@ def create_app() -> Flask:
             live_quiz=live_quiz,
             live_logs=live_logs,
             live_students=live_students,
+            live_student_rows=live_student_rows,
             live_quiz_id=live_quiz_id,
             realtime_enabled=bool(socketio),
         )
@@ -1140,53 +1198,141 @@ def create_app() -> Flask:
 
         data = request.get_json(silent=True) or {}
         image_data = str(data.get("image", ""))
+        quiz_id = str(data.get("quizId", "")).strip()
+        attempt_id = str(data.get("attemptId", "")).strip()
         frame = decode_image_from_data_url(image_data)
         if frame is None:
             return jsonify({"error": "Unable to decode the camera frame."}), 400
 
         try:
             model = get_detection_model()
-            results = model(frame)[0]
-            frame_height, frame_width = frame.shape[:2]
+            results = model.predict(
+                source=frame,
+                conf=DETECTION_INFER_CONFIDENCE,
+                iou=DETECTION_INFER_IOU,
+                imgsz=DETECTION_INFER_IMGSZ,
+                max_det=DETECTION_INFER_MAX_DET,
+                verbose=False,
+            )[0]
             detections = []
+            model_has_classification = bool(getattr(model, "names", None))
+
+            def resolve_detection_type(label: str) -> tuple[str | None, str | None]:
+                normalized_label = label.strip().lower()
+                if normalized_label == "normal":
+                    return "normal", None
+                if normalized_label == "cheat":
+                    return "cheating", "cheat"
+                return None, None
             
             for box in results.boxes:
                 coords = box.xyxy[0].cpu().numpy().tolist()
                 confidence = float(box.conf[0].cpu().item())
                 class_id = int(box.cls[0].cpu().item())
                 label = str(model.names.get(class_id, class_id))
-                
-                x1, y1, x2, y2 = coords
-                is_normal, cheating_reason = classify_face_detection(
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    confidence,
-                    frame_width,
-                    frame_height,
-                )
+                detection_type, cheating_reason = resolve_detection_type(label)
+                if not detection_type:
+                    continue
+
+                min_class_conf = DETECTION_CLASS_CHEAT_MIN_CONF if detection_type == "cheating" else DETECTION_CLASS_NORMAL_MIN_CONF
+                if confidence < min_class_conf:
+                    continue
 
                 detections.append(
                     {
                         "bbox": [coords[0], coords[1], coords[2], coords[3]],
                         "confidence": confidence,
                         "label": label,
-                        "type": "normal" if is_normal else "cheating",
-                        "cheating_reason": cheating_reason if not is_normal else None,
+                        "type": detection_type,
+                        "cheating_reason": cheating_reason if detection_type == "cheating" else None,
                     }
                 )
-            
-            # Multiple faces detected = cheating
-            if len(detections) > 1:
-                for det in detections:
-                    det["type"] = "cheating"
-                    det["cheating_reason"] = "multiple_faces"
+
+            if detections and model_has_classification:
+                detections.sort(key=lambda item: float(item.get("confidence", 0)), reverse=True)
                     
         except Exception as exc:
             return jsonify({"error": f"Detection failed: {exc}"}), 500
 
-        return jsonify({"detections": detections})
+        normal_count = sum(1 for item in detections if item.get("type") == "normal")
+        cheating_count = len(detections) - normal_count
+        suspicious_reason = None
+        suspicious_description = ""
+        flag_level = "low"
+        event_type = "face_detected"
+        top_detection = detections[0] if detections else None
+        top_cheat_conf = max((float(item.get("confidence", 0)) for item in detections if item.get("type") == "cheating"), default=0.0)
+        top_normal_conf = max((float(item.get("confidence", 0)) for item in detections if item.get("type") == "normal"), default=0.0)
+
+        if not detections:
+            suspicious_reason = "no_face"
+            suspicious_description = "No confident face classification yet."
+            flag_level = "low"
+            event_type = "no_face_detected"
+        elif top_cheat_conf > 0 and top_cheat_conf >= (top_normal_conf + DETECTION_CLASS_MARGIN):
+            suspicious_reason = str(top_detection.get("cheating_reason") or "cheat")
+            suspicious_description = f"Suspicious face detection: {suspicious_reason.replace('_', ' ')}."
+            flag_level = "high"
+            event_type = f"detection_{suspicious_reason}"
+        else:
+            suspicious_description = "Face detected normally."
+
+        detection_status = {
+            "state": "normal" if not suspicious_reason else "suspicious",
+            "reason": suspicious_reason,
+            "message": suspicious_description,
+            "normal_count": normal_count,
+            "suspicious_count": cheating_count,
+            "model_label": (top_detection or {}).get("label", ""),
+            "model_confidence": float((top_detection or {}).get("confidence", 0.0)),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "flag_level": flag_level,
+        }
+
+        user = get_user_by_id(session.get("user_id", "")) or get_user("user")
+        attempt = get_attempt(attempt_id) if attempt_id else None
+        valid_attempt = bool(
+            attempt
+            and quiz_id
+            and attempt.get("quiz_id") == quiz_id
+            and user
+            and attempt.get("student_id") == user.get("id")
+            and attempt.get("status") == "in_progress"
+        )
+
+        if socketio and quiz_id and valid_attempt:
+            socketio.emit(
+                "detection_update",
+                {
+                    "quizId": quiz_id,
+                    "attemptId": attempt_id,
+                    "studentName": attempt.get("student_name", "Student"),
+                    "studentEmail": attempt.get("student_email", ""),
+                    "detection": detection_status,
+                },
+                to=f"monitor:{quiz_id}",
+            )
+
+        created_log = None
+        if valid_attempt and _should_log_detection_event(attempt_id, event_type):
+            created_log = create_activity_log(
+                quiz_id=quiz_id,
+                attempt_id=attempt_id,
+                event_type=event_type,
+                event_description=suspicious_description,
+                flag_level=flag_level,
+            )
+            if socketio:
+                socketio.emit(
+                    "activity_log_created",
+                    {
+                        "quizId": quiz_id,
+                        "log": activity_log_with_details(created_log),
+                    },
+                    to=f"monitor:{quiz_id}",
+                )
+
+        return jsonify({"detections": detections, "detection": detection_status, "logged": bool(created_log)})
 
     @app.route("/JoinQuiz")
     @role_required("user")
@@ -1219,11 +1365,23 @@ def create_app() -> Flask:
         user = get_user_by_id(session.get("user_id", "")) or get_user("user")
         submitted = False
         attempt = None
+        active_attempt_id = ""
+
+        if request.method == "GET" and access_allowed and user:
+            active_attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], False)
 
         if request.method == "POST" and access_allowed:
             answers = {question["id"]: request.form.get(f"question_{question['id']}", "") for question in quiz["questions"]}
             consent_given = request.form.get("consent_given") == "on" or not quiz["monitoring_enabled"]
-            attempt_id = submit_quiz_attempt(quiz["id"], user["id"], answers, consent_given)
+            attempt_id = request.form.get("attempt_id", "").strip()
+            if attempt_id:
+                attempt = get_attempt(attempt_id)
+                valid_owner = bool(attempt and attempt.get("quiz_id") == quiz["id"] and attempt.get("student_id") == user["id"])
+                if not valid_owner:
+                    attempt_id = ""
+            if not attempt_id:
+                attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], consent_given)
+            attempt_id = finalize_quiz_attempt(attempt_id, answers, consent_given)
             return redirect(url_for("take_quiz", quizId=quiz["id"], submitted=1, attemptId=attempt_id))
 
         if request.args.get("submitted") == "1":
@@ -1241,6 +1399,7 @@ def create_app() -> Flask:
             schedule_status=schedule_status,
             realtime_enabled=bool(socketio),
             current_user_name=(user or {}).get("full_name", "Student"),
+            active_attempt_id=active_attempt_id,
         )
 
     @app.route("/UserManagement")
@@ -1268,9 +1427,34 @@ def create_app() -> Flask:
             return {
                 "sid": participant.get("sid", ""),
                 "role": participant.get("role", ""),
+                "user_id": participant.get("user_id", ""),
+                "attempt_id": participant.get("attempt_id", ""),
                 "display_name": participant.get("display_name", ""),
+                "email": participant.get("email", ""),
                 "camera_on": bool(participant.get("camera_on", False)),
             }
+
+        def emit_monitor_student_snapshot(quiz_id: str, target_sid: str | None = None) -> None:
+            participants = room_participants(quiz_id)
+            student_items = []
+            for item in participants.values():
+                if item.get("role") != "user":
+                    continue
+                student_items.append(
+                    {
+                        "sid": item.get("sid", ""),
+                        "attempt_id": item.get("attempt_id", ""),
+                        "user_id": item.get("user_id", ""),
+                        "display_name": item.get("display_name", "Student"),
+                        "email": item.get("email", ""),
+                        "camera_on": bool(item.get("camera_on", False)),
+                    }
+                )
+            payload = {"quizId": quiz_id, "students": student_items}
+            if target_sid:
+                emit("monitor_students_snapshot", payload, to=target_sid)
+                return
+            emit("monitor_students_snapshot", payload, room=room_name(quiz_id))
 
         @socketio.on("join_monitor_room")
         def on_join_monitor_room(data):
@@ -1289,12 +1473,18 @@ def create_app() -> Flask:
 
             participants = room_participants(quiz_id)
             sid = request.sid
-            display_name = (session.get("full_name") or role.title()).strip()
+            current_user = get_user_by_id(session.get("user_id", "")) if session.get("user_id") else None
+            display_name = ((current_user or {}).get("full_name") or role.title()).strip()
+            attempt_id = str((data or {}).get("attemptId", "")).strip()
+            user_id = (current_user or {}).get("id", "")
             participants[sid] = {
                 "sid": sid,
                 "quiz_id": quiz_id,
                 "role": role,
+                "user_id": user_id,
+                "attempt_id": attempt_id,
                 "display_name": display_name,
+                "email": (current_user or {}).get("email", ""),
                 "camera_on": bool((data or {}).get("cameraOn", False) and role == "user"),
             }
 
@@ -1306,7 +1496,9 @@ def create_app() -> Flask:
                 },
                 to=sid,
             )
+            emit_monitor_student_snapshot(quiz_id, target_sid=sid)
             emit("participant_joined", participant_payload(participants[sid]), room=room, include_self=False)
+            emit_monitor_student_snapshot(quiz_id)
 
         @socketio.on("set_camera_status")
         def on_set_camera_status(data):
@@ -1335,6 +1527,7 @@ def create_app() -> Flask:
 
             participant["camera_on"] = camera_on
             emit("participant_updated", participant_payload(participant), room=room_name(quiz_id))
+            emit_monitor_student_snapshot(quiz_id)
 
         @socketio.on("webrtc_offer")
         def on_webrtc_offer(data):
@@ -1407,6 +1600,9 @@ def create_app() -> Flask:
                 participants.pop(sid)
                 leave_room(room)
                 emit("participant_left", {"sid": sid}, room=room)
+                quiz_id = room.split(":", 1)[1] if ":" in room else ""
+                if quiz_id:
+                    emit_monitor_student_snapshot(quiz_id)
                 if not participants:
                     _monitor_rooms.pop(room, None)
                 break

@@ -19,25 +19,6 @@
         </select>
         <button class="button primary" type="submit" name="live" value="1" id="live-view-btn">Live View</button>
     </form>
-
-    <script>
-    document.addEventListener("DOMContentLoaded", () => {
-        const liveViewBtn = document.getElementById("live-view-btn");
-        const liveMonalBackdrop = document.getElementById("live-monitor-modal");
-
-        if (liveViewBtn) {
-            liveViewBtn.addEventListener("click", (e) => {
-                e.preventDefault();
-                
-                // FOR TESTING: Show live feed modal immediately without validation
-                if (liveMonalBackdrop) {
-                    liveMonalBackdrop.style.display = "flex";
-                    document.body.classList.add("modal-open");
-                }
-            });
-        }
-    });
-    </script>
 </section>
 
 <section class="activity-stats-grid">
@@ -109,7 +90,7 @@
                     <th>Action</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody id="activity-log-tbody">
                 {% for log in logs %}
                 <tr>
                     <td>
@@ -132,16 +113,15 @@
     </article>
 </section>
 
-{% if live_mode or true %}
-<!-- Testing: show live feed modal on button click -->
-<div class="modal-backdrop" id="live-monitor-modal" style="display:none;">
+{% if live_mode and live_quiz %}
+<div class="modal-backdrop" id="live-monitor-modal" style="display:flex;">
     <aside class="live-drawer live-monitor-modal">
         <div class="live-drawer-head">
             <div>
                 <p class="drawer-kicker">Live Monitor</p>
                 <h2>{{ live_quiz.title }}</h2>
                 <div class="live-drawer-stats">
-                    <span>{{ live_students|length }} active</span>
+                    <span id="live-student-count">{{ live_students|length }} active</span>
                     <span>{{ live_logs|length }} events</span>
                 </div>
             </div>
@@ -175,8 +155,46 @@
             </div>
         </section>
 
+        <section class="panel" style="margin: 0 0 0.9rem; padding: 1rem; width:100%;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap;">
+                <h3 style="margin:0;font-size:1rem;">Students Taking Quiz (Realtime)</h3>
+                <span id="student-monitor-count" class="status-badge">{{ live_student_rows|length }} students</span>
+            </div>
+            <div style="margin-top:0.9rem;max-height:280px;overflow:auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Student</th>
+                            <th>Camera</th>
+                            <th>Detection</th>
+                            <th>Level</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="live-student-tbody">
+                        {% for student in live_student_rows %}
+                        <tr data-attempt-id="{{ student.attempt_id }}">
+                            <td>
+                                <strong>{{ student.student_name }}</strong>
+                                <div class="table-subtext">{{ student.student_email }}</div>
+                            </td>
+                            <td><span class="pill">{{ 'On' if student.camera_on else 'Off' }}</span></td>
+                            <td>{{ student.detection_status }}</td>
+                            <td><span class="pill severity-{{ student.flag_level }}">{{ student.flag_level }}</span></td>
+                            <td>{{ student.updated_at }}</td>
+                        </tr>
+                        {% else %}
+                        <tr id="live-student-empty-row">
+                            <td colspan="5">No students are taking this quiz right now.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
         {% if live_logs %}
-        <div class="live-drawer-body">
+        <div class="live-drawer-body" id="live-event-list">
             {% for log in live_logs %}
             <div class="live-event-card severity-{{ log.flag_level }}">
                 <div class="live-event-top">
@@ -193,7 +211,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <div class="live-empty">
+        <div class="live-empty" id="live-event-empty">
             <div class="live-empty-icon">
                 <svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M3 8h18"></path>
@@ -203,6 +221,7 @@
             </div>
             <p>No events yet</p>
         </div>
+        <div class="live-drawer-body" id="live-event-list" style="display:none;"></div>
         {% endif %}
     </aside>
 </div>
@@ -216,6 +235,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const feedGrid = document.getElementById("camera-feed-grid");
     const feedCount = document.getElementById("camera-feed-count");
     const errorBox = document.getElementById("camera-monitoring-error");
+    const studentTableBody = document.getElementById("live-student-tbody");
+    const studentCount = document.getElementById("student-monitor-count");
+    const liveCount = document.getElementById("live-student-count");
+    const activityTableBody = document.getElementById("activity-log-tbody");
+    const liveEventList = document.getElementById("live-event-list");
+    const liveEventEmpty = document.getElementById("live-event-empty");
     if (!quizId || !feedGrid || !window.io) {
         return;
     }
@@ -224,6 +249,101 @@ document.addEventListener("DOMContentLoaded", () => {
     const peers = new Map();
     const tiles = new Map();
     const participants = new Map();
+    const studentsByAttempt = new Map();
+
+    function safeText(value) {
+        return String(value || "")
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#39;");
+    }
+
+    function severityClass(level) {
+        if (level === "high" || level === "medium" || level === "low") {
+            return level;
+        }
+        return "low";
+    }
+
+    function renderStudentRows() {
+        if (!studentTableBody) return;
+        const rows = Array.from(studentsByAttempt.values());
+        studentTableBody.innerHTML = "";
+        if (!rows.length) {
+            studentTableBody.innerHTML = '<tr id="live-student-empty-row"><td colspan="5">No students are taking this quiz right now.</td></tr>';
+        } else {
+            rows.sort((a, b) => String(a.student_name || "").localeCompare(String(b.student_name || "")));
+            rows.forEach((student) => {
+                const tr = document.createElement("tr");
+                tr.dataset.attemptId = student.attempt_id || "";
+                tr.innerHTML = `
+                    <td>
+                        <strong>${safeText(student.student_name || "Student")}</strong>
+                        <div class="table-subtext">${safeText(student.student_email || "")}</div>
+                    </td>
+                    <td><span class="pill">${student.camera_on ? "On" : "Off"}</span></td>
+                    <td>${safeText(student.detection_status || "No detection yet")}</td>
+                    <td><span class="pill severity-${severityClass(student.flag_level)}">${safeText(student.flag_level || "low")}</span></td>
+                    <td>${safeText(student.updated_at || "")}</td>
+                `;
+                studentTableBody.appendChild(tr);
+            });
+        }
+
+        if (studentCount) {
+            studentCount.textContent = `${rows.length} students`;
+        }
+        if (liveCount) {
+            liveCount.textContent = `${rows.length} active`;
+        }
+    }
+
+    function appendActivityRows(log) {
+        if (!log) return;
+
+        if (activityTableBody) {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <td>
+                    <strong>${safeText(log.student_name || "Student")}</strong>
+                    <div class="table-subtext">${safeText(log.student_email || "")}</div>
+                </td>
+                <td>${safeText("{{ live_quiz.title if live_quiz else '' }}")}</td>
+                <td>
+                    <strong>${safeText(String(log.event_type || "").replaceAll("_", " "))}</strong>
+                    <div class="table-subtext">${safeText(log.event_description || "")}</div>
+                </td>
+                <td><span class="pill severity-${severityClass(log.flag_level)}">${safeText(log.flag_level || "low")}</span></td>
+                <td>${safeText(log.timestamp || "")}</td>
+                <td><span class="status-badge">Pending</span></td>
+                <td><a class="review-link" href="#">Review</a></td>
+            `;
+            activityTableBody.prepend(row);
+        }
+
+        if (!liveEventList) return;
+        if (liveEventEmpty) {
+            liveEventEmpty.style.display = "none";
+        }
+        liveEventList.style.display = "grid";
+        const card = document.createElement("div");
+        card.className = `live-event-card severity-${severityClass(log.flag_level)}`;
+        card.innerHTML = `
+            <div class="live-event-top">
+                <strong>${safeText(log.student_name || "Student")}</strong>
+                <span class="pill severity-${severityClass(log.flag_level)}">${safeText(log.flag_level || "low")}</span>
+            </div>
+            <p class="live-event-type">${safeText(String(log.event_type || "").replaceAll("_", " "))}</p>
+            <p class="live-event-text">${safeText(log.event_description || "")}</p>
+            <div class="live-event-meta">
+                <span>${safeText(log.timestamp || "")}</span>
+                <span>Flagged</span>
+            </div>
+        `;
+        liveEventList.prepend(card);
+    }
 
     function updateCount() {
         if (feedCount) {
@@ -383,6 +503,21 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!participant || !participant.sid) return;
         participants.set(participant.sid, participant);
         if (participant.role !== "user") return;
+
+        const attemptKey = participant.attempt_id || participant.sid;
+        const existing = studentsByAttempt.get(attemptKey) || {};
+        studentsByAttempt.set(attemptKey, {
+            ...existing,
+            attempt_id: participant.attempt_id || attemptKey,
+            student_name: participant.display_name || existing.student_name || "Student",
+            student_email: participant.email || existing.student_email || "",
+            camera_on: !!participant.camera_on,
+            detection_status: existing.detection_status || "Waiting for detection",
+            flag_level: existing.flag_level || "low",
+            updated_at: existing.updated_at || "",
+        });
+        renderStudentRows();
+
         if (participant.camera_on) {
             createPeerForStudent(participant);
         } else {
@@ -410,8 +545,60 @@ document.addEventListener("DOMContentLoaded", () => {
     socket.on("participant_left", (payload) => {
         const sid = (payload || {}).sid;
         if (!sid) return;
+        const participant = participants.get(sid);
+        if (participant) {
+            const attemptKey = participant.attempt_id || sid;
+            studentsByAttempt.delete(attemptKey);
+            renderStudentRows();
+        }
         participants.delete(sid);
         closePeer(sid);
+    });
+
+    socket.on("monitor_students_snapshot", (payload) => {
+        const students = (payload && payload.students) || [];
+        studentsByAttempt.clear();
+        students.forEach((student) => {
+            const key = student.attempt_id || student.sid;
+            studentsByAttempt.set(key, {
+                attempt_id: student.attempt_id || key,
+                student_name: student.display_name || "Student",
+                student_email: student.email || "",
+                camera_on: !!student.camera_on,
+                detection_status: "Waiting for detection",
+                flag_level: "low",
+                updated_at: "",
+            });
+        });
+        renderStudentRows();
+    });
+
+    socket.on("detection_update", (payload) => {
+        if (!payload || payload.quizId !== quizId) return;
+        const key = payload.attemptId || payload.studentEmail || payload.studentName;
+        if (!key) return;
+        const current = studentsByAttempt.get(key) || {
+            attempt_id: payload.attemptId || key,
+            student_name: payload.studentName || "Student",
+            student_email: payload.studentEmail || "",
+        };
+        const detection = payload.detection || {};
+        studentsByAttempt.set(key, {
+            ...current,
+            attempt_id: payload.attemptId || current.attempt_id,
+            student_name: payload.studentName || current.student_name,
+            student_email: payload.studentEmail || current.student_email,
+            camera_on: true,
+            detection_status: detection.message || "Detection update",
+            flag_level: detection.flag_level || (detection.state === "suspicious" ? "medium" : "low"),
+            updated_at: detection.timestamp || current.updated_at || "",
+        });
+        renderStudentRows();
+    });
+
+    socket.on("activity_log_created", (payload) => {
+        if (!payload || payload.quizId !== quizId) return;
+        appendActivityRows(payload.log || null);
     });
 
     socket.on("webrtc_answer", async (payload) => {
@@ -441,6 +628,8 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!message) return;
         showError(message);
     });
+
+    renderStudentRows();
 
     window.addEventListener("beforeunload", () => {
         peers.forEach((_, sid) => closePeer(sid));

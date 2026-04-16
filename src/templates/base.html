@@ -98,9 +98,6 @@
                 <a href="{{ url_for('student_dashboard') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'student_dashboard' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
                     <span class="w-5 text-center text-base leading-none">◫</span><span class="text-[15px] leading-none">Dashboard</span>
                 </a>
-                <a href="{{ url_for('student_camera') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'student_camera' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
-                    <span class="w-5 text-center text-base leading-none">🎥</span><span class="text-[15px] leading-none">Live Camera</span>
-                </a>
                 <a href="{{ url_for('join_quiz') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'join_quiz' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
                     <span class="w-5 text-center text-base leading-none">⊕</span><span class="text-[15px] leading-none">Join Quiz</span>
                 </a>

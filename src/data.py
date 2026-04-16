@@ -12,7 +12,15 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-from werkzeug.security import check_password_hash, generate_password_hash
+try:
+    from werkzeug.security import check_password_hash, generate_password_hash
+except Exception:  # pragma: no cover - Werkzeug is expected with Flask, but keep a clear fallback.
+    def generate_password_hash(password: str) -> str:
+        raise RuntimeError("Werkzeug security helpers are not available.")
+
+
+    def check_password_hash(_hash: str, _password: str) -> bool:
+        raise RuntimeError("Werkzeug security helpers are not available.")
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -851,15 +859,50 @@ def get_attempt(attempt_id: str) -> dict | None:
         return attempt_with_details(row, connection) if row else None
 
 
-def submit_quiz_attempt(quiz_id: str, student_id: str, answers: dict[str, str], consent_given: bool) -> str:
+def get_in_progress_attempt(quiz_id: str, student_id: str, quiz_code: str) -> dict | None:
+    if using_supabase():
+        rows = [
+            row
+            for row in _sb_select("quiz_attempts", {"quiz_id": quiz_id, "student_id": student_id, "status": "in_progress"})
+            if row.get("quiz_code", "") == quiz_code
+        ]
+        rows = _sort_rows(rows, "started_at", reverse=True)
+        return rows[0] if rows else None
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM quiz_attempts
+            WHERE quiz_id = ? AND student_id = ? AND quiz_code = ? AND status = 'in_progress'
+            ORDER BY datetime(started_at) DESC, rowid DESC
+            LIMIT 1
+            """,
+            (quiz_id, student_id, quiz_code),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def ensure_quiz_attempt_in_progress(quiz_id: str, student_id: str, consent_given: bool = False) -> str:
     quiz = get_quiz(quiz_id)
     if not quiz:
         raise ValueError("Quiz not found.")
 
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    active_attempt = get_in_progress_attempt(quiz_id, student_id, quiz["quiz_code"])
+    if active_attempt:
+        if consent_given and not active_attempt.get("consent_given"):
+            if using_supabase():
+                _sb_update("quiz_attempts", {"consent_given": True}, {"id": active_attempt["id"]})
+            else:
+                with get_connection() as connection:
+                    connection.execute(
+                        "UPDATE quiz_attempts SET consent_given = 1 WHERE id = ?",
+                        (active_attempt["id"],),
+                    )
+        return active_attempt["id"]
+
+    started_at = _now_stamp()
     attempt_id = next_id("attempt")
-    score = 0
-    total_points = quiz["total_points"]
 
     if using_supabase():
         _sb_insert(
@@ -871,14 +914,43 @@ def submit_quiz_attempt(quiz_id: str, student_id: str, answers: dict[str, str], 
                 "quiz_code": quiz["quiz_code"],
                 "score": 0,
                 "percentage": 0,
-                "status": "submitted",
+                "status": "in_progress",
                 "started_at": started_at,
-                "submitted_at": started_at,
+                "submitted_at": None,
                 "consent_given": bool(consent_given),
                 "created_at": started_at,
             },
         )
+        return attempt_id
 
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO quiz_attempts (id, quiz_id, student_id, quiz_code, score, percentage, status, started_at, submitted_at, consent_given)
+            VALUES (?, ?, ?, ?, 0, 0, 'in_progress', ?, NULL, ?)
+            """,
+            (attempt_id, quiz_id, student_id, quiz["quiz_code"], started_at, int(consent_given)),
+        )
+    return attempt_id
+
+
+def finalize_quiz_attempt(attempt_id: str, answers: dict[str, str], consent_given: bool) -> str:
+    attempt = get_attempt(attempt_id)
+    if not attempt:
+        raise ValueError("Quiz attempt not found.")
+    if attempt.get("status") in {"submitted", "auto_submitted"}:
+        return attempt_id
+
+    quiz = get_quiz(attempt["quiz_id"])
+    if not quiz:
+        raise ValueError("Quiz not found.")
+
+    submitted_at = _now_stamp()
+    score = 0
+    total_points = quiz["total_points"]
+
+    if using_supabase():
+        _sb_delete("student_responses", {"attempt_id": attempt_id})
         for question in quiz["questions"]:
             selected_answer = answers.get(question["id"], "")
             is_correct = selected_answer == question["correct_answer"]
@@ -893,27 +965,26 @@ def submit_quiz_attempt(quiz_id: str, student_id: str, answers: dict[str, str], 
                     "selected_option": selected_answer,
                     "text_response": "",
                     "is_correct": bool(is_correct),
-                    "created_at": started_at,
+                    "created_at": submitted_at,
                 },
             )
 
         percentage = round((score / total_points) * 100, 2) if total_points else 0
         _sb_update(
             "quiz_attempts",
-            {"score": score, "percentage": percentage, "submitted_at": started_at},
+            {
+                "score": score,
+                "percentage": percentage,
+                "status": "submitted",
+                "submitted_at": submitted_at,
+                "consent_given": bool(consent_given),
+            },
             {"id": attempt_id},
         )
         return attempt_id
 
     with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO quiz_attempts (id, quiz_id, student_id, quiz_code, score, percentage, status, started_at, submitted_at, consent_given)
-            VALUES (?, ?, ?, ?, 0, 0, 'submitted', ?, ?, ?)
-            """,
-            (attempt_id, quiz_id, student_id, quiz["quiz_code"], started_at, started_at, int(consent_given)),
-        )
-
+        connection.execute("DELETE FROM student_responses WHERE attempt_id = ?", (attempt_id,))
         for question in quiz["questions"]:
             selected_answer = answers.get(question["id"], "")
             is_correct = selected_answer == question["correct_answer"]
@@ -936,11 +1007,63 @@ def submit_quiz_attempt(quiz_id: str, student_id: str, answers: dict[str, str], 
 
         percentage = round((score / total_points) * 100, 2) if total_points else 0
         connection.execute(
-            "UPDATE quiz_attempts SET score = ?, percentage = ?, submitted_at = ? WHERE id = ?",
-            (score, percentage, started_at, attempt_id),
+            """
+            UPDATE quiz_attempts
+            SET score = ?, percentage = ?, status = 'submitted', submitted_at = ?, consent_given = ?
+            WHERE id = ?
+            """,
+            (score, percentage, submitted_at, int(consent_given), attempt_id),
         )
 
     return attempt_id
+
+
+def submit_quiz_attempt(quiz_id: str, student_id: str, answers: dict[str, str], consent_given: bool) -> str:
+    attempt_id = ensure_quiz_attempt_in_progress(quiz_id, student_id, consent_given)
+    return finalize_quiz_attempt(attempt_id, answers, consent_given)
+
+
+def create_activity_log(
+    quiz_id: str,
+    attempt_id: str,
+    event_type: str,
+    event_description: str,
+    flag_level: str = "low",
+) -> dict:
+    created_date = _now_stamp()
+    payload = {
+        "id": next_id("flag"),
+        "quiz_id": quiz_id,
+        "attempt_id": attempt_id,
+        "event_type": event_type,
+        "event_description": event_description,
+        "flag_level": flag_level,
+        "reviewed": False,
+        "instructor_notes": "",
+        "created_date": created_date,
+    }
+
+    if using_supabase():
+        _sb_insert("activity_logs", payload)
+        return payload
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO activity_logs (id, quiz_id, attempt_id, event_type, event_description, flag_level, reviewed, instructor_notes, created_date)
+            VALUES (?, ?, ?, ?, ?, ?, 0, '', ?)
+            """,
+            (
+                payload["id"],
+                payload["quiz_id"],
+                payload["attempt_id"],
+                payload["event_type"],
+                payload["event_description"],
+                payload["flag_level"],
+                payload["created_date"],
+            ),
+        )
+    return payload
 
 
 def activity_log_with_details(row: sqlite3.Row | dict) -> dict:
@@ -1154,7 +1277,7 @@ def quiz_access_state(quiz: dict, student_id: str | None = None, now: datetime |
         return False, f"This quiz closed on {format_schedule(quiz.get('scheduled_end'))} and is now locked."
     if student_id:
         existing_attempt = get_quiz_attempt_for_student_code(quiz["id"], student_id, quiz["quiz_code"])
-        if existing_attempt:
+        if existing_attempt and existing_attempt.get("status") in {"submitted", "auto_submitted"}:
             return False, "You have already taken this quiz with the current access code. Ask your instructor to generate a new code to retake it."
     return True, None
 

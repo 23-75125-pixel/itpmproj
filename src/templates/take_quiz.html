@@ -64,8 +64,27 @@
         {% endfor %}
     </div>
 
+    {% if quiz.monitoring_enabled %}
+    <section class="panel" style="margin-bottom:1rem;">
+        <div class="panel-head" style="margin-bottom:0.75rem;">
+            <div>
+                <h2 style="margin:0;">Camera Preview</h2>
+                <p class="subhead" style="margin-top:0.35rem;">Your camera opens automatically for quiz monitoring.</p>
+            </div>
+            <div>
+                <span id="detection-debug-badge" class="status-badge">Model: waiting...</span>
+            </div>
+        </div>
+        <div style="position:relative;overflow:hidden;border-radius:20px;background:#0f172a;min-height:260px;">
+            <video id="student-camera-preview" autoplay muted playsinline style="width:100%;height:100%;max-height:420px;object-fit:cover;background:#0f172a;"></video>
+            <canvas id="student-detection-overlay" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;"></canvas>
+        </div>
+    </section>
+    {% endif %}
+
     <form id="quiz-submit-form" method="post" class="take-quiz-form">
         <input type="hidden" name="quizId" value="{{ quiz.id }}">
+        <input type="hidden" name="attempt_id" value="{{ active_attempt_id }}">
         {% if quiz.monitoring_enabled %}
         <input id="consent-field" type="hidden" name="consent_given" value="">
         {% endif %}
@@ -131,6 +150,8 @@
     </div>
 </div>
 
+<script id="quiz-meta" type="application/json">{{ {"totalQuestions": quiz.questions|length, "countdownSecondsStart": quiz.time_limit_minutes * 60, "quizId": quiz.id, "quizCode": quiz.quiz_code}|tojson }}</script>
+
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     const form = document.getElementById("quiz-submit-form");
@@ -141,8 +162,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const answeredLabel = document.getElementById("answered-label");
     const submitAnsweredCount = document.getElementById("submit-answered-count");
     const timer = document.getElementById("countdown-timer");
-    const totalQuestions = {{ quiz.questions|length }};
-    const countdownSecondsStart = {{ quiz.time_limit_minutes * 60 }};
+    const quizMeta = JSON.parse(document.getElementById("quiz-meta").textContent);
+    const totalQuestions = quizMeta.totalQuestions;
+    const countdownSecondsStart = quizMeta.countdownSecondsStart;
     let countdownSeconds = countdownSecondsStart;
 
     function updateAnsweredCount() {
@@ -184,6 +206,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (confirmSubmit && form) {
         confirmSubmit.addEventListener("click", () => {
+            form.dispatchEvent(new CustomEvent("quiz:before-submit"));
             form.submit();
         });
     }
@@ -196,6 +219,7 @@ document.addEventListener("DOMContentLoaded", () => {
             timer.classList.toggle("warning", countdownSeconds <= 300 && countdownSeconds > 120);
             timer.classList.toggle("danger", countdownSeconds <= 120);
             if (countdownSeconds <= 0) {
+                form.dispatchEvent(new CustomEvent("quiz:before-submit"));
                 form.submit();
                 return;
             }
@@ -212,7 +236,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const consentField = document.getElementById("consent-field");
 
     function leaveQuiz() {
-        window.location.href = "{{ url_for('join_quiz', code=quiz.quiz_code) }}";
+        window.location.href = `/JoinQuiz?code=${encodeURIComponent(quizMeta.quizCode)}`;
     }
 
     if (consentModal) {
@@ -243,8 +267,15 @@ document.addEventListener("DOMContentLoaded", () => {
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
-    const quizId = "{{ quiz.id }}";
+    const quizMeta = JSON.parse(document.getElementById("quiz-meta").textContent);
+    const quizId = quizMeta.quizId;
+    const attemptId = document.querySelector('input[name="attempt_id"]')?.value || "";
     const monitoringStatus = document.getElementById("monitoring-status");
+    const detectionDebugBadge = document.getElementById("detection-debug-badge");
+    const submitForm = document.getElementById("quiz-submit-form");
+    const previewVideo = document.getElementById("student-camera-preview");
+    const overlayCanvas = document.getElementById("student-detection-overlay");
+    const overlayCtx = overlayCanvas ? overlayCanvas.getContext("2d") : null;
     const consentModal = document.getElementById("consent-modal");
     const acceptConsent = document.getElementById("accept-consent");
     const declineConsent = document.getElementById("decline-consent");
@@ -253,7 +284,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const peerConnections = new Map();
     let socket = null;
     let localStream = null;
+    let detectionTimer = null;
+    let detectionInFlight = false;
     let cameraActive = false;
+    const DETECTION_INTERVAL_MS = 900;
+    const DETECTION_MAX_FRAME_WIDTH = 960;
+    const captureCanvas = document.createElement("canvas");
+    const captureContext = captureCanvas.getContext("2d");
+    const localPreview = document.createElement("video");
+    localPreview.autoplay = true;
+    localPreview.muted = true;
+    localPreview.playsInline = true;
 
     function setStatus(message) {
         if (monitoringStatus) {
@@ -261,12 +302,86 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    function setDebugBadge(text) {
+        if (detectionDebugBadge) {
+            detectionDebugBadge.textContent = text;
+        }
+    }
+
+    function clearDetections() {
+        if (!overlayCanvas || !overlayCtx) return;
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
+
+    function resizeOverlay() {
+        if (!overlayCanvas) return;
+        const displayW = Math.max(1, Math.round(overlayCanvas.clientWidth));
+        const displayH = Math.max(1, Math.round(overlayCanvas.clientHeight));
+        if (overlayCanvas.width !== displayW || overlayCanvas.height !== displayH) {
+            overlayCanvas.width = displayW;
+            overlayCanvas.height = displayH;
+        }
+    }
+
+    function drawDetections(detections, sourceWidth, sourceHeight) {
+        if (!overlayCanvas || !overlayCtx) return;
+        resizeOverlay();
+        clearDetections();
+
+        if (!detections || !detections.length || !sourceWidth || !sourceHeight) {
+            return;
+        }
+
+        const displayW = overlayCanvas.width;
+        const displayH = overlayCanvas.height;
+
+        const scale = Math.max(displayW / sourceWidth, displayH / sourceHeight);
+        const renderedW = sourceWidth * scale;
+        const renderedH = sourceHeight * scale;
+        const offsetX = (displayW - renderedW) / 2;
+        const offsetY = (displayH - renderedH) / 2;
+
+        detections.forEach((det) => {
+            const bbox = det.bbox || [];
+            if (bbox.length !== 4) return;
+
+            const x1 = bbox[0] * scale + offsetX;
+            const y1 = bbox[1] * scale + offsetY;
+            const x2 = bbox[2] * scale + offsetX;
+            const y2 = bbox[3] * scale + offsetY;
+            const w = x2 - x1;
+            const h = y2 - y1;
+
+            const isNormal = String(det.type || "").toLowerCase() === "normal";
+            const lineColor = isNormal ? "#22c55e" : "#ef4444";
+            const fillColor = isNormal ? "rgba(34, 197, 94, 0.16)" : "rgba(239, 68, 68, 0.16)";
+
+            overlayCtx.fillStyle = fillColor;
+            overlayCtx.fillRect(x1, y1, w, h);
+
+            overlayCtx.strokeStyle = lineColor;
+            overlayCtx.lineWidth = 2;
+            overlayCtx.strokeRect(x1, y1, w, h);
+
+            const label = `${det.label || det.type || "face"} ${Math.round(Number(det.confidence || 0) * 100)}%`;
+            overlayCtx.font = "bold 13px Manrope, sans-serif";
+            const textW = overlayCtx.measureText(label).width;
+            const textX = Math.max(0, x1);
+            const textY = Math.max(18, y1 - 6);
+
+            overlayCtx.fillStyle = lineColor;
+            overlayCtx.fillRect(textX - 1, textY - 14, textW + 10, 18);
+            overlayCtx.fillStyle = "#ffffff";
+            overlayCtx.fillText(label, textX + 4, textY);
+        });
+    }
+
     function ensureSocket() {
         if (socket || !window.io) return;
         socket = io();
 
         socket.on("connect", () => {
-            socket.emit("join_monitor_room", { quizId, role: "user", cameraOn: cameraActive });
+            socket.emit("join_monitor_room", { quizId, role: "user", attemptId, cameraOn: cameraActive });
             if (cameraActive) {
                 socket.emit("set_camera_status", { quizId, cameraOn: true });
             }
@@ -346,29 +461,143 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    async function sendDetectionFrame() {
+        if (detectionInFlight) {
+            return;
+        }
+
+        const captureVideo = previewVideo || localPreview;
+        if (!cameraActive || !localStream || !captureContext || !captureVideo || captureVideo.readyState < 2) {
+            return;
+        }
+
+        const width = captureVideo.videoWidth;
+        const height = captureVideo.videoHeight;
+        if (!width || !height) {
+            return;
+        }
+
+        detectionInFlight = true;
+
+        const scale = Math.min(1, DETECTION_MAX_FRAME_WIDTH / width);
+        const sendWidth = Math.max(1, Math.round(width * scale));
+        const sendHeight = Math.max(1, Math.round(height * scale));
+
+        captureCanvas.width = sendWidth;
+        captureCanvas.height = sendHeight;
+        captureContext.drawImage(captureVideo, 0, 0, sendWidth, sendHeight);
+
+        try {
+            const response = await fetch("{{ url_for('detect_face') }}", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: captureCanvas.toDataURL("image/jpeg", 0.82),
+                    quizId,
+                    attemptId,
+                }),
+            });
+            if (!response.ok) {
+                setStatus("detection unavailable");
+                setDebugBadge("Model: detection unavailable");
+                return;
+            }
+            const payload = await response.json();
+            const detail = payload && payload.detection;
+            const detections = (payload && payload.detections) || [];
+            if (detail && detail.model_label) {
+                const conf = Math.round(Number(detail.model_confidence || 0) * 100);
+                setDebugBadge(`Model: ${String(detail.model_label)} (${conf}%)`);
+            } else if (detections.length > 0) {
+                const top = [...detections].sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0))[0];
+                const label = String(top.label || "unknown");
+                const conf = Math.round(Number(top.confidence || 0) * 100);
+                setDebugBadge(`Model: ${label} (${conf}%)`);
+            } else {
+                setDebugBadge("Model: no face");
+            }
+            drawDetections(detections, sendWidth, sendHeight);
+            if (!detail) {
+                setStatus("live");
+                return;
+            }
+            if (detail.state === "normal") {
+                setStatus("live (normal)");
+            } else {
+                setStatus(`live (${detail.message || "suspicious"})`);
+            }
+        } catch (_) {
+            setStatus("detection request failed");
+            setDebugBadge("Model: detection failed");
+            clearDetections();
+        } finally {
+            detectionInFlight = false;
+        }
+    }
+
     async function startCameraMonitoring() {
         if (cameraActive) return;
+        ensureSocket();
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setStatus("camera API unavailable");
+            return;
+        }
+
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            const captureVideo = previewVideo || localPreview;
+            
+            if (previewVideo) {
+                previewVideo.srcObject = localStream;
+                await previewVideo.play();
+            } else {
+                localPreview.srcObject = localStream;
+                await localPreview.play();
+            }
+            
             cameraActive = true;
             setStatus("live");
-            ensureSocket();
+            
             if (socket && socket.connected) {
                 socket.emit("set_camera_status", { quizId, cameraOn: true });
             }
+            
+            detectionTimer = window.setInterval(sendDetectionFrame, DETECTION_INTERVAL_MS);
+            
+            // Wait for video to have dimensions before sending first frame
+            const waitForVideoMetadata = () => {
+                if (captureVideo.videoWidth > 0 && captureVideo.videoHeight > 0) {
+                    sendDetectionFrame();
+                } else {
+                    window.setTimeout(waitForVideoMetadata, 50);
+                }
+            };
+            waitForVideoMetadata();
         } catch (_) {
             setStatus("camera permission denied");
         }
     }
 
-    function stopCameraMonitoring() {
+    function stopCameraMonitoring(disconnectSocket = false) {
         cameraActive = false;
+        if (detectionTimer) {
+            window.clearInterval(detectionTimer);
+            detectionTimer = null;
+        }
         if (localStream) {
             localStream.getTracks().forEach((track) => track.stop());
             localStream = null;
         }
+        if (previewVideo) {
+            previewVideo.srcObject = null;
+        }
+        localPreview.srcObject = null;
         if (socket && socket.connected) {
             socket.emit("set_camera_status", { quizId, cameraOn: false });
+            if (disconnectSocket) {
+                socket.disconnect();
+            }
         }
         peerConnections.forEach((pc) => {
             try {
@@ -379,6 +608,9 @@ document.addEventListener("DOMContentLoaded", () => {
         });
         peerConnections.clear();
         setStatus("off");
+        setDebugBadge("Model: off");
+        clearDetections();
+        detectionInFlight = false;
     }
 
     if (!consentModal) {
@@ -389,18 +621,23 @@ document.addEventListener("DOMContentLoaded", () => {
         acceptConsent.addEventListener("click", startCameraMonitoring);
     }
     if (declineConsent) {
-        declineConsent.addEventListener("click", stopCameraMonitoring);
+        declineConsent.addEventListener("click", () => stopCameraMonitoring(true));
     }
     if (declineConsentX) {
-        declineConsentX.addEventListener("click", stopCameraMonitoring);
+        declineConsentX.addEventListener("click", () => stopCameraMonitoring(true));
+    }
+
+    if (submitForm) {
+        submitForm.addEventListener("quiz:before-submit", () => {
+            stopCameraMonitoring(true);
+        });
     }
 
     window.addEventListener("beforeunload", () => {
-        stopCameraMonitoring();
-        if (socket) {
-            socket.disconnect();
-        }
+        stopCameraMonitoring(true);
     });
+
+    window.addEventListener("resize", resizeOverlay);
 });
 </script>
 {% elif quiz.monitoring_enabled and not realtime_enabled %}
