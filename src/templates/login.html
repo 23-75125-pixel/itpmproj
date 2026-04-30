@@ -3,11 +3,19 @@
 {% block public_content %}
 <div class="min-h-screen bg-[#222a2f] flex items-center justify-center p-4 sm:p-6 lg:p-8">
     <div class="w-full max-w-6xl rounded-[1.4rem] overflow-hidden bg-white shadow-[0_24px_72px_rgba(0,0,0,0.4)] grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] lg:min-h-[640px]">
-        <aside class="relative flex min-h-[220px] sm:min-h-[280px] lg:min-h-full items-center justify-center text-white" style="background-image: linear-gradient(135deg, rgba(143, 18, 58, 0.18), rgba(255, 255, 255, 0.06)), url('/static/img/login-left-bg.svg'); background-size: cover; background-position: center;">
-            <div class="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/10"></div>
-            <div class="relative z-10 text-center px-6 sm:px-8">
-                <div class="mx-auto mb-6 sm:mb-8 h-28 w-28 sm:h-40 sm:w-40 rounded-3xl bg-white border border-white/70 shadow-xl flex items-center justify-center">
+        <aside
+            class="relative flex min-h-[220px] sm:min-h-[280px] lg:min-h-full items-center justify-center overflow-hidden text-white"
+        >
+            <img
+                src="{{ url_for('static', filename='img/loginbg.png', v='20260424-1') }}"
+                alt="Batangas State University campus"
+                class="absolute inset-0 z-0 h-full w-full object-cover object-[22%_center]"
+            >
+            <div class="absolute inset-0 z-0 bg-black/10"></div>
+            <div class="relative z-10 mx-6 sm:mx-8 rounded-[2rem] bg-black/28 px-6 py-8 text-center shadow-2xl backdrop-blur-[2px]">
+                <div class="mx-auto mb-6 sm:mb-8 h-28 w-28 sm:h-40 sm:w-40 rounded-3xl bg-white/92 border border-white/70 shadow-xl flex items-center justify-center">
                     <svg class="h-20 w-20 sm:h-32 sm:w-32" viewBox="0 0 100 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect width="100" height="140" rx="18" fill="white"/>
                         <!-- Helmet -->
                         <path d="M35 25 L40 10 L60 10 L65 25 Q70 30 70 40 L30 40 Q30 30 35 25" fill="#DC143C" stroke="#8a1538" stroke-width="1.5"/>
                         <!-- Helmet detail lines -->
@@ -43,7 +51,7 @@
                         <text x="50" y="100" font-size="6" font-weight="bold" fill="#DC143C" text-anchor="middle" font-family="Arial">SPARTANS</text>
                     </svg>
                 </div>
-                <h1 class="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-wider text-white leading-tight">Smart Exam Management and Cheating Detection System</h1>
+                <h1 class="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-wider text-white leading-tight [text-shadow:0_4px_18px_rgba(0,0,0,0.45)]">Smart Exam Management and Cheating Detection System</h1>
 
             </div>
         </aside>

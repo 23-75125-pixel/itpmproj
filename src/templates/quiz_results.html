@@ -24,29 +24,31 @@
         </div>
         <button class="button tertiary" type="button">Export to CSV</button>
     </div>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Score</th>
-                <th>Percentage</th>
-                <th>Status</th>
-                <th>Flag Count</th>
-                <th>Submission Time</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for attempt in attempts %}
-            <tr>
-                <td>{{ attempt.student_name }}</td>
-                <td>{{ attempt.score }}/{{ attempt.total_points }}</td>
-                <td>{{ attempt.percentage }}%</td>
-                <td>{{ attempt.status }}</td>
-                <td>{{ all_flags | selectattr('attempt_id', 'equalto', attempt.id) | list | length }}</td>
-                <td>{{ attempt.submitted_at or 'Still active' }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-scroll">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Score</th>
+                    <th>Percentage</th>
+                    <th>Status</th>
+                    <th>Flag Count</th>
+                    <th>Submission Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for attempt in attempts %}
+                <tr>
+                    <td>{{ attempt.student_name }}</td>
+                    <td>{{ attempt.score }}/{{ attempt.total_points }}</td>
+                    <td>{{ attempt.percentage }}%</td>
+                    <td>{{ attempt.status }}</td>
+                    <td>{{ all_flags | selectattr('attempt_id', 'equalto', attempt.id) | list | length }}</td>
+                    <td>{{ attempt.submitted_at or 'Still active' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </section>
 {% endblock %}

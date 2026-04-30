@@ -24,14 +24,16 @@
             <label>Subject / Topic
                 <input type="text" name="subject" value="{{ sample_quiz.subject }}" placeholder="e.g., Mathematics">
             </label>
-            <label>Time Limit (minutes)
-                <input type="number" name="time_limit_minutes" value="{{ sample_quiz.time_limit_minutes }}" min="1">
+            <label>Time Limit (auto)
+                <input type="hidden" id="time-limit-minutes" name="time_limit_minutes" value="{{ sample_quiz.time_limit_minutes }}">
+                <input type="text" id="time-limit-display" value="{{ sample_quiz.time_limit_minutes }} minutes" readonly>
+                <small class="helper">Automatically calculated from the scheduled start and end.</small>
             </label>
             <label>Scheduled Start
-                <input type="datetime-local" name="scheduled_start" value="{{ format_schedule_input(sample_quiz.scheduled_start) }}">
+                <input type="datetime-local" id="scheduled-start-input" name="scheduled_start" value="{{ format_schedule_input(sample_quiz.scheduled_start) }}">
             </label>
             <label>Scheduled End
-                <input type="datetime-local" name="scheduled_end" value="{{ format_schedule_input(sample_quiz.scheduled_end) }}">
+                <input type="datetime-local" id="scheduled-end-input" name="scheduled_end" value="{{ format_schedule_input(sample_quiz.scheduled_end) }}">
             </label>
             <div class="code-group">
                 <label>Quiz Code
@@ -242,6 +244,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const pdfAiStatus = document.getElementById("pdf-ai-status");
     const pdfQuestionType = document.getElementById("pdf-question-type");
     const pdfQuestionCount = document.getElementById("pdf-question-count");
+    const timeLimitInput = document.getElementById("time-limit-minutes");
+    const timeLimitDisplay = document.getElementById("time-limit-display");
+    const scheduledStartInput = document.getElementById("scheduled-start-input");
+    const scheduledEndInput = document.getElementById("scheduled-end-input");
     let generatedPdfQuestions = [];
 
     function randomCode() {
@@ -398,6 +404,28 @@ document.addEventListener("DOMContentLoaded", () => {
             return "true_false";
         }
         return "multiple_choice";
+    }
+
+    function parseDateTimeLocal(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return null;
+        const normalized = raw.includes("T") ? raw.replace("T", " ") : raw;
+        const parsed = new Date(normalized.replace(" ", "T"));
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function updateTimeLimitFromSchedule() {
+        if (!timeLimitInput || !timeLimitDisplay) return;
+        const start = scheduledStartInput ? parseDateTimeLocal(scheduledStartInput.value) : null;
+        const end = scheduledEndInput ? parseDateTimeLocal(scheduledEndInput.value) : null;
+        let minutes = Number(timeLimitInput.value || 15);
+
+        if (start && end && end > start) {
+            minutes = Math.max(1, Math.floor((end - start) / 60000));
+        }
+
+        timeLimitInput.value = String(minutes);
+        timeLimitDisplay.value = `${minutes} minute${minutes === 1 ? "" : "s"}`;
     }
 
     function setCsvStatus(message, kind = "info") {
@@ -746,6 +774,16 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    if (scheduledStartInput) {
+        scheduledStartInput.addEventListener("input", updateTimeLimitFromSchedule);
+        scheduledStartInput.addEventListener("change", updateTimeLimitFromSchedule);
+    }
+
+    if (scheduledEndInput) {
+        scheduledEndInput.addEventListener("input", updateTimeLimitFromSchedule);
+        scheduledEndInput.addEventListener("change", updateTimeLimitFromSchedule);
+    }
+
     questionList.addEventListener("change", (event) => {
         const select = event.target.closest(".question-type-select");
         if (!select) {
@@ -766,6 +804,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     editorForm.addEventListener("submit", () => {
+        updateTimeLimitFromSchedule();
         const payload = Array.from(questionList.querySelectorAll("[data-question]")).map((card) => {
             const optionRows = Array.from(card.querySelectorAll(".option-row"));
             const options = optionRows
@@ -786,6 +825,7 @@ document.addEventListener("DOMContentLoaded", () => {
         payloadInput.value = JSON.stringify(payload);
     });
 
+    updateTimeLimitFromSchedule();
     updateLabels();
 });
 </script>

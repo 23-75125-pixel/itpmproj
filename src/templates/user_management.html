@@ -65,52 +65,54 @@
     <div class="user-table-head">
         <h2>All Users</h2>
     </div>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Email</th>
-                <th>Role</th>
-                <th>Joined</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for user in users %}
-            <tr>
-                <td>
-                    <div class="user-name-cell">
-                        <span class="user-initial" aria-hidden="true">
-                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <div class="table-scroll">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Joined</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>
+                        <div class="user-name-cell">
+                            <span class="user-initial" aria-hidden="true">
+                                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="8" r="4"></circle>
+                                    <path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"></path>
+                                </svg>
+                            </span>
+                            <strong>{{ user.full_name }}</strong>
+                        </div>
+                    </td>
+                    <td>{{ user.email }}</td>
+                    <td>
+                        <span class="role-badge {% if user.role == 'admin' %}role-instructor{% else %}role-student{% endif %}">
+                            {% if user.role == 'admin' %}
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;">
+                                <path d="M22 10v6M2 10v6"></path>
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                                <path d="M6 12v5c0 1.8 2.7 3 6 3s6-1.2 6-3v-5"></path>
+                            </svg>
+                            {% else %}
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;">
                                 <circle cx="12" cy="8" r="4"></circle>
                                 <path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"></path>
                             </svg>
+                            {% endif %}
+                            {{ "Instructor" if user.role == "admin" else "Student" }}
                         </span>
-                        <strong>{{ user.full_name }}</strong>
-                    </div>
-                </td>
-                <td>{{ user.email }}</td>
-                <td>
-                    <span class="role-badge {% if user.role == 'admin' %}role-instructor{% else %}role-student{% endif %}">
-                        {% if user.role == 'admin' %}
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;">
-                            <path d="M22 10v6M2 10v6"></path>
-                            <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-                            <path d="M6 12v5c0 1.8 2.7 3 6 3s6-1.2 6-3v-5"></path>
-                        </svg>
-                        {% else %}
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;">
-                            <circle cx="12" cy="8" r="4"></circle>
-                            <path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"></path>
-                        </svg>
-                        {% endif %}
-                        {{ "Instructor" if user.role == "admin" else "Student" }}
-                    </span>
-                </td>
-                <td>{{ user.created_at or user.joined or "-" }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+                    </td>
+                    <td>{{ user.created_at or user.joined or "-" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </section>
 
 <div id="invite-modal" class="modal-backdrop" hidden>

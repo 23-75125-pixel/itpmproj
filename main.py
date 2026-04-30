@@ -25,6 +25,11 @@ from src.app import create_app, socketio
 
 app = create_app()
 
+# Configure app to work with ngrok and other reverse proxies
+# This middleware trusts X-Forwarded-For, X-Forwarded-Proto headers from reverse proxies
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
+
 
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")

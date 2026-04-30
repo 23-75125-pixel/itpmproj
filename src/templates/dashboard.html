@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}SEMCDS | Dashboard{% endblock %}
 {% block content %}
+<div class="instructor-dashboard dashboard-page">
 <!-- Header -->
 <div class="mb-8">
     <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -15,7 +16,7 @@
     </div>
 </div>
 <!-- Stats Grid -->
-<div class="grid md:grid-cols-4 gap-6 mb-8">
+<div class="grid md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8 instructor-stats-grid">
     <div class="bg-white rounded-xl p-6 border border-gray-200 shadow-sm hover:shadow-md transition">
         <div class="flex items-start justify-between mb-4">
             <div>
@@ -79,7 +80,7 @@
 </div>
 
 <!-- Average Score Panel -->
-<div class="bg-gradient-to-r from-rose-50 to-red-50 rounded-xl p-5 sm:p-6 lg:p-8 border border-rose-100 mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+<div class="bg-gradient-to-r from-rose-50 to-red-50 rounded-xl p-5 sm:p-6 lg:p-8 border border-rose-100 mb-8 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between instructor-average-panel">
     <div class="flex items-center gap-4 sm:gap-6">
         <div class="w-16 h-16 bg-rose-100 text-rose-700 rounded-xl flex items-center justify-center">
             <svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -99,8 +100,8 @@
     </a>
 </div>
 
-<section class="grid lg:grid-cols-3 gap-6 mb-8">
-    <article class="lg:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm p-5 sm:p-6">
+<section class="grid lg:grid-cols-3 gap-6 mb-8 instructor-main-grid">
+    <article class="lg:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm p-5 sm:p-6 instructor-schedule-panel min-w-0">
         <div class="flex flex-wrap items-center justify-between gap-4 mb-5">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 rounded-xl bg-rose-100 text-rose-800 flex items-center justify-center">
@@ -131,10 +132,10 @@
             </div>
         </div>
 
-        <div class="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4">
+        <div class="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4 instructor-day-panel">
             <strong class="text-gray-900">{{ selected_day or calendar_month }}</strong>
             {% if selected_day_quizzes %}
-            <div class="mt-3 space-y-3">
+            <div class="mt-3 space-y-3 instructor-day-list">
                 {% for quiz in selected_day_quizzes %}
                 <div class="flex items-start justify-between gap-3 rounded-lg bg-white border border-gray-200 p-3">
                     <div>
@@ -151,7 +152,7 @@
         </div>
     </article>
 
-    <article class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 sm:p-6">
+    <article class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 sm:p-6 instructor-ai-panel min-w-0">
         <div class="flex items-start gap-3 mb-5">
             <div class="w-10 h-10 rounded-lg bg-rose-100 text-rose-800 flex items-center justify-center">
                 <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -180,7 +181,7 @@
         </div>
 
         {% if summary %}
-        <div class="summary-result mt-5 space-y-4">
+        <div class="summary-result mt-5 space-y-4 instructor-summary-scroll">
             <div class="rounded-lg p-3 border {% if summary.risk_level|lower == 'high' %}bg-red-50 border-red-200{% elif summary.risk_level|lower == 'medium' %}bg-amber-50 border-amber-200{% else %}bg-green-50 border-green-200{% endif %}">
                 <span class="inline-block text-xs font-semibold px-2 py-1 rounded-full mb-2 {% if summary.risk_level|lower == 'high' %}bg-red-100 text-red-700{% elif summary.risk_level|lower == 'medium' %}bg-amber-100 text-amber-700{% else %}bg-green-100 text-green-700{% endif %}">{{ summary.risk_level }} Risk</span>
                 <p class="text-sm text-gray-700">{{ summary.overview }}</p>
@@ -222,7 +223,7 @@
     <a class="text-sm font-semibold text-rose-700 hover:text-rose-800" href="{{ url_for('quiz_manager') }}">View all -&gt;</a>
 </section>
 
-<section class="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+<section class="grid md:grid-cols-2 xl:grid-cols-3 gap-5 instructor-recent-grid">
     {% for quiz in recent_quizzes %}
     <article class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 hover:shadow-md transition">
         <div class="flex items-start justify-between gap-3 mb-3">
@@ -350,4 +351,5 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 });
 </script>
+</div>
 {% endblock %}

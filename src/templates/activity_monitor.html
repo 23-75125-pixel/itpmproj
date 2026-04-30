@@ -3,24 +3,18 @@
 {% block content %}
 <section class="page-head">
     <div>
-        <h1>Activity Monitor</h1>
-        <p class="subhead">Review flagged activity events during quizzes. Flags are for review only.</p>
+        <h1>{% if live_mode %}Live View{% else %}Activity Monitor{% endif %}</h1>
+        <p class="subhead">
+            {% if live_mode %}
+            Monitor live camera feeds for the selected quiz.
+            {% else %}
+            Review flagged activity events during quizzes. Flags are for review only.
+            {% endif %}
+        </p>
     </div>
-    <form class="live-topbar" method="get" id="live-view-form">
-        <input type="hidden" name="quizId" value="{{ selected_quiz }}">
-        <input type="hidden" name="severity" value="{{ selected_severity }}">
-        <input type="hidden" name="reviewed" value="{{ selected_reviewed }}">
-        <input type="hidden" name="student" value="{{ search }}">
-        <select name="liveQuizId" id="live-quiz-select">
-            <option value="" {% if not live_quiz_id %}selected{% endif %}>Watch quiz live...</option>
-            {% for quiz in quizzes %}
-            <option value="{{ quiz.id }}" {% if live_quiz_id == quiz.id %}selected{% endif %}>{{ quiz.title }}</option>
-            {% endfor %}
-        </select>
-        <button class="button primary" type="submit" name="live" value="1" id="live-view-btn">Live View</button>
-    </form>
 </section>
 
+{% if not live_mode %}
 <section class="activity-stats-grid">
     <article class="stat-card">
         <div class="stat-icon slate">
@@ -64,167 +58,237 @@
 <form class="activity-filterbar" method="get">
     <input type="hidden" name="liveQuizId" value="{{ live_quiz_id }}">
     {% if live_mode %}<input type="hidden" name="live" value="1">{% endif %}
-    <input type="hidden" name="quizId" value="{{ selected_quiz }}">
-    <div class="search-shell activity-search">
-        <span class="search-icon">⌕</span>
-        <input type="text" name="student" placeholder="Search by student name or email..." value="{{ search }}">
+    <div class="activity-filter-fields">
+        <label>
+            Quiz
+            <select name="quizId">
+                <option value="all" {% if selected_quiz == 'all' %}selected{% endif %}>All quizzes</option>
+                {% for quiz in quizzes %}
+                <option value="{{ quiz.id }}" {% if selected_quiz == quiz.id %}selected{% endif %}>{{ quiz.title }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Student
+            <select name="studentEmail">
+                <option value="" {% if not selected_student_email %}selected{% endif %}>All students</option>
+                {% for student in student_options %}
+                {% set student_key = student.student_email|lower if student.student_email else 'unknown:' ~ student.student_name|lower %}
+                <option value="{{ student_key }}" {% if selected_student_email == student_key %}selected{% endif %}>
+                    {{ student.student_name }}{% if student.student_email %} ({{ student.student_email }}){% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Search
+            <div class="search-shell activity-search">
+                <span class="search-icon">⌕</span>
+                <input type="text" name="student" placeholder="Search by student name or email..." value="{{ search }}">
+            </div>
+        </label>
+        <label>
+            Level
+            <select name="severity">
+                <option value="all" {% if selected_severity == 'all' %}selected{% endif %}>All levels</option>
+                <option value="high" {% if selected_severity == 'high' %}selected{% endif %}>High</option>
+                <option value="medium" {% if selected_severity == 'medium' %}selected{% endif %}>Medium</option>
+                <option value="low" {% if selected_severity == 'low' %}selected{% endif %}>Low</option>
+            </select>
+        </label>
+        <label>
+            Review Status
+            <select name="reviewed">
+                <option value="all" {% if selected_reviewed == 'all' %}selected{% endif %}>All statuses</option>
+                <option value="pending" {% if selected_reviewed == 'pending' %}selected{% endif %}>Pending</option>
+                <option value="reviewed" {% if selected_reviewed == 'reviewed' %}selected{% endif %}>Reviewed</option>
+            </select>
+        </label>
     </div>
     <div class="activity-pill-groups">
         <div class="filter-pills">
-            <button class="filter-pill active" type="submit" name="severity" value="all">All</button>
+            <button class="filter-pill active" type="submit">Apply Filters</button>
+            {% if selected_student_email or search or selected_quiz != 'all' or selected_severity != 'all' or selected_reviewed != 'all' %}
+            <a class="filter-pill" href="{{ url_for('activity_monitor') }}">Clear</a>
+            {% endif %}
         </div>
     </div>
 </form>
 
 <section class="monitor-layout {% if live_mode %}live-open{% endif %}">
-    <article class="panel activity-table-panel">
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th>Student</th>
-                    <th>Quiz</th>
-                    <th>Event</th>
-                    <th>Level</th>
-                    <th>Time</th>
-                    <th>Status</th>
-                    <th>Action</th>
-                </tr>
-            </thead>
-            <tbody id="activity-log-tbody">
-                {% for log in logs %}
-                <tr>
-                    <td>
-                        <strong>{{ log.student_name }}</strong>
-                        <div class="table-subtext">{{ log.student_email }}</div>
-                    </td>
-                    <td>{{ (quizzes | selectattr('id', 'equalto', log.quiz_id) | list | first).title if (quizzes | selectattr('id', 'equalto', log.quiz_id) | list) else log.quiz_id }}</td>
-                    <td>
-                        <strong>{{ log.event_type.replace('_', ' ').title() }}</strong>
-                        <div class="table-subtext">{{ log.event_description }}</div>
-                    </td>
-                    <td><span class="pill severity-{{ log.flag_level }}">{{ log.flag_level }}</span></td>
-                    <td>{{ log.timestamp }}</td>
-                    <td><span class="status-badge">{{ 'Pending' if not log.reviewed else 'Reviewed' }}</span></td>
-                    <td><a class="review-link" href="#">Review</a></td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </article>
-</section>
-
-{% if live_mode and live_quiz %}
-<div class="modal-backdrop" id="live-monitor-modal" style="display:flex;">
-    <aside class="live-drawer live-monitor-modal">
-        <div class="live-drawer-head">
+    <article class="panel activity-student-panel">
+        <div class="activity-student-panel-head">
             <div>
-                <p class="drawer-kicker">Live Monitor</p>
-                <h2>{{ live_quiz.title }}</h2>
-                <div class="live-drawer-stats">
-                    <span id="live-student-count">{{ live_students|length }} active</span>
-                    <span>{{ live_logs|length }} events</span>
-                </div>
+                <h2>{% if selected_student %}{{ selected_student.student_name }} Camera Activity Tally{% else %}Students With Activity{% endif %}</h2>
+                <p class="helper">
+                    {% if selected_student %}
+                    All camera-detected activity currently matched by the filters is tallied below for this student.
+                    {% else %}
+                    Pick one student to view a cleaner tally of camera-detected activity without a long repeated-name list.
+                    {% endif %}
+                </p>
             </div>
-            <a class="drawer-close" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search) }}">x</a>
+            <div class="activity-student-panel-actions">
+                <span class="status-badge">{{ student_activity_rows|length }} student{% if student_activity_rows|length != 1 %}s{% endif %}</span>
+                {% if selected_student %}
+                <a class="button secondary" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search) }}">Back to students</a>
+                {% endif %}
+            </div>
         </div>
-
-        <section class="panel live-camera-panel" style="margin: 0 0 0.9rem; padding: 1rem; width:100%;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap;">
-                <div>
-                    <h3 style="margin:0;font-size:1rem;">Live Camera Feed</h3>
-                   
-                </div>
-                <span id="camera-feed-count" class="status-badge">0 Live</span>
-            </div>
-            <div id="camera-monitoring-error" class="schedule-message blocked" style="display:none;margin:0.9rem 0 0;"></div>
-            <div id="camera-feed-grid" class="live-camera-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.7rem;margin-top:0.9rem;width:100%;">
-                {% for _ in range(10) %}
-                <article class="panel camera-slot placeholder" style="margin:0;padding:0.65rem;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
-                        <strong style="font-size:0.82rem;line-height:1.2;color:#6b7280;">Waiting for student</strong>
-                        <span class="pill" style="font-size:0.7rem;opacity:0.85;">Idle</span>
+        {% if student_activity_rows %}
+        <div class="activity-student-grid">
+            {% for student in student_activity_rows %}
+            {% set student_key = student.student_email|lower if student.student_email else 'unknown:' ~ student.student_name|lower %}
+            <a class="activity-student-card" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search, studentEmail=student_key) }}">
+                <div class="activity-student-top">
+                    <div>
+                        <strong>{{ student.student_name }}</strong>
+                        <div class="table-subtext">{{ student.student_email or 'No email available' }}</div>
                     </div>
-                    <div style="width:100%;height:clamp(140px,22vh,210px);border-radius:10px;background:#111827;display:grid;place-items:center;color:#ffffff;font-size:0.78rem;">
-                        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.95;">
-                            <path d="M23 7l-7 5 7 5V7z"></path>
-                            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-                        </svg>
-                    </div>
-                </article>
-                {% endfor %}
-            </div>
-        </section>
-
-        <section class="panel" style="margin: 0 0 0.9rem; padding: 1rem; width:100%;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap;">
-                <h3 style="margin:0;font-size:1rem;">Students Taking Quiz (Realtime)</h3>
-                <span id="student-monitor-count" class="status-badge">{{ live_student_rows|length }} students</span>
-            </div>
-            <div style="margin-top:0.9rem;max-height:280px;overflow:auto;">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Student</th>
-                            <th>Camera</th>
-                            <th>Detection</th>
-                            <th>Level</th>
-                            <th>Updated</th>
-                        </tr>
-                    </thead>
-                    <tbody id="live-student-tbody">
-                        {% for student in live_student_rows %}
-                        <tr data-attempt-id="{{ student.attempt_id }}">
-                            <td>
-                                <strong>{{ student.student_name }}</strong>
-                                <div class="table-subtext">{{ student.student_email }}</div>
-                            </td>
-                            <td><span class="pill">{{ 'On' if student.camera_on else 'Off' }}</span></td>
-                            <td>{{ student.detection_status }}</td>
-                            <td><span class="pill severity-{{ student.flag_level }}">{{ student.flag_level }}</span></td>
-                            <td>{{ student.updated_at }}</td>
-                        </tr>
-                        {% else %}
-                        <tr id="live-student-empty-row">
-                            <td colspan="5">No students are taking this quiz right now.</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        {% if live_logs %}
-        <div class="live-drawer-body" id="live-event-list">
-            {% for log in live_logs %}
-            <div class="live-event-card severity-{{ log.flag_level }}">
-                <div class="live-event-top">
-                    <strong>{{ log.student_name }}</strong>
-                    <span class="pill severity-{{ log.flag_level }}">{{ log.flag_level }}</span>
+                    <span class="pill severity-{{ student.highest_level }}">{{ student.highest_level }}</span>
                 </div>
-                <p class="live-event-type">{{ log.event_type.replace('_', ' ').title() }}</p>
-                <p class="live-event-text">{{ log.event_description }}</p>
-                <div class="live-event-meta">
-                    <span>{{ log.timestamp }}</span>
-                    <span>{% if log.reviewed %}Reviewed{% else %}Flagged{% endif %}</span>
+                <div class="activity-student-metrics">
+                    <span>{{ student.event_count }} events</span>
+                    <span>{{ student.quiz_count }} quizzes</span>
+                    <span>{{ student.pending_count }} pending</span>
+                    <span>{{ student.reviewed_count }} reviewed</span>
                 </div>
-            </div>
+                <p class="activity-student-latest">{{ student.latest_event }}{% if student.latest_quiz %} in {{ student.latest_quiz }}{% endif %}</p>
+                {% if student.event_tallies %}
+                <div class="activity-student-tallies">
+                    {% for label, count in student.event_tallies %}
+                    <span class="pill">{{ label }} x{{ count }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <div class="activity-student-footer">
+                    <span>{{ student.last_activity }}</span>
+                    <span class="review-link">{% if selected_student %}Viewing all{% else %}View all{% endif %}</span>
+                </div>
+            </a>
             {% endfor %}
         </div>
         {% else %}
-        <div class="live-empty" id="live-event-empty">
-            <div class="live-empty-icon">
-                <svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M3 8h18"></path>
-                    <path d="M7 12h10"></path>
-                    <path d="M10 16h4"></path>
-                </svg>
-            </div>
-            <p>No events yet</p>
+        <div class="live-empty">
+            <p>No student activity matched the current filters.</p>
         </div>
-        <div class="live-drawer-body" id="live-event-list" style="display:none;"></div>
         {% endif %}
+    </article>
+
+    {% if selected_student %}
+    <article class="panel activity-event-panel">
+        <div class="activity-event-panel-head">
+            <div>
+                <h2>All Detected Events</h2>
+                <p class="helper">Full event list for {{ selected_student.student_name }} based on the current filters.</p>
+            </div>
+            <span class="status-badge">{{ logs|length }} events</span>
+        </div>
+        {% if logs %}
+        <div class="table-scroll activity-event-table-wrap">
+            <table class="data-table activity-event-table">
+                <thead>
+                    <tr>
+                        <th>Quiz</th>
+                        <th>Event</th>
+                        <th>Description</th>
+                        <th>Level</th>
+                        <th>Time</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td>{{ quiz_lookup.get(log.quiz_id, {}).get('title', log.quiz_id) }}</td>
+                        <td><strong>{{ log.event_type.replace('_', ' ').title() }}</strong></td>
+                        <td>{{ log.event_description }}</td>
+                        <td><span class="pill severity-{{ log.flag_level }}">{{ log.flag_level }}</span></td>
+                        <td>{{ log.timestamp }}</td>
+                        <td><span class="status-badge">{{ 'Reviewed' if log.reviewed else 'Pending' }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="live-empty">
+            <p>No activity logs matched the current filters.</p>
+        </div>
+        {% endif %}
+    </article>
+    {% endif %}
+
+</section>
+{% endif %}
+
+{% if live_mode and live_quiz %}
+<section class="live-monitor-workspace" id="live-monitor-modal">
+    <aside class="live-drawer live-monitor-workspace-shell">
+        <div class="live-monitor-content live-monitor-content-camera-only">
+            <div class="live-monitor-topbar">
+                <a class="drawer-close live-inline-close" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search) }}">Close</a>
+            </div>
+            <div class="live-monitor-main live-monitor-main-camera-only">
+                <section class="panel live-camera-panel live-panel-section">
+                    <div class="live-section-head">
+                        <h3>Live Camera Feed</h3>
+                        <span id="camera-feed-count" class="status-badge">0 Live</span>
+                    </div>
+                    <div id="camera-monitoring-error" class="schedule-message blocked live-monitoring-error" style="display:none;"></div>
+                    <div id="camera-feed-grid" class="live-camera-grid">
+                        <article class="panel camera-slot placeholder">
+                            <div class="camera-slot-head">
+                                <strong class="camera-slot-name idle">Waiting for student</strong>
+                                <span class="pill camera-slot-state">Idle</span>
+                            </div>
+                            <div class="camera-slot-frame">
+                                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.95;">
+                                    <path d="M23 7l-7 5 7 5V7z"></path>
+                                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                                </svg>
+                            </div>
+                        </article>
+                    </div>
+                </section>
+                <section class="panel live-panel-section">
+                    <div class="live-section-head">
+                        <h3>Latest Detection Status</h3>
+                        <span id="live-student-count" class="status-badge">{{ live_student_rows|length }} active</span>
+                    </div>
+                    {% if live_student_rows %}
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Student</th>
+                                    <th>Email</th>
+                                    <th>Result</th>
+                                    <th>Updated</th>
+                                </tr>
+                            </thead>
+                            <tbody id="live-detection-body">
+                                {% for row in live_student_rows %}
+                                <tr data-attempt-id="{{ row.attempt_id }}">
+                                    <td><strong>{{ row.student_name }}</strong></td>
+                                    <td>{{ row.student_email or 'No email available' }}</td>
+                                    <td><span class="pill severity-{{ row.flag_level }} live-detection-result">{{ row.detection_status }}</span></td>
+                                    <td class="live-detection-updated">{{ row.updated_at or 'waiting' }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="live-empty">
+                        <p>No active student sessions yet.</p>
+                    </div>
+                    {% endif %}
+                </section>
+            </div>
+        </div>
     </aside>
-</div>
+</section>
 {% endif %}
 
 {% if live_mode and realtime_enabled %}
@@ -235,12 +299,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const feedGrid = document.getElementById("camera-feed-grid");
     const feedCount = document.getElementById("camera-feed-count");
     const errorBox = document.getElementById("camera-monitoring-error");
-    const studentTableBody = document.getElementById("live-student-tbody");
-    const studentCount = document.getElementById("student-monitor-count");
-    const liveCount = document.getElementById("live-student-count");
-    const activityTableBody = document.getElementById("activity-log-tbody");
-    const liveEventList = document.getElementById("live-event-list");
-    const liveEventEmpty = document.getElementById("live-event-empty");
+    const liveDetectionBody = document.getElementById("live-detection-body");
     if (!quizId || !feedGrid || !window.io) {
         return;
     }
@@ -249,7 +308,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const peers = new Map();
     const tiles = new Map();
     const participants = new Map();
-    const studentsByAttempt = new Map();
 
     function safeText(value) {
         return String(value || "")
@@ -260,94 +318,21 @@ document.addEventListener("DOMContentLoaded", () => {
             .replaceAll("'", "&#39;");
     }
 
-    function severityClass(level) {
-        if (level === "high" || level === "medium" || level === "low") {
-            return level;
-        }
-        return "low";
-    }
-
-    function renderStudentRows() {
-        if (!studentTableBody) return;
-        const rows = Array.from(studentsByAttempt.values());
-        studentTableBody.innerHTML = "";
-        if (!rows.length) {
-            studentTableBody.innerHTML = '<tr id="live-student-empty-row"><td colspan="5">No students are taking this quiz right now.</td></tr>';
-        } else {
-            rows.sort((a, b) => String(a.student_name || "").localeCompare(String(b.student_name || "")));
-            rows.forEach((student) => {
-                const tr = document.createElement("tr");
-                tr.dataset.attemptId = student.attempt_id || "";
-                tr.innerHTML = `
-                    <td>
-                        <strong>${safeText(student.student_name || "Student")}</strong>
-                        <div class="table-subtext">${safeText(student.student_email || "")}</div>
-                    </td>
-                    <td><span class="pill">${student.camera_on ? "On" : "Off"}</span></td>
-                    <td>${safeText(student.detection_status || "No detection yet")}</td>
-                    <td><span class="pill severity-${severityClass(student.flag_level)}">${safeText(student.flag_level || "low")}</span></td>
-                    <td>${safeText(student.updated_at || "")}</td>
-                `;
-                studentTableBody.appendChild(tr);
-            });
-        }
-
-        if (studentCount) {
-            studentCount.textContent = `${rows.length} students`;
-        }
-        if (liveCount) {
-            liveCount.textContent = `${rows.length} active`;
-        }
-    }
-
-    function appendActivityRows(log) {
-        if (!log) return;
-
-        if (activityTableBody) {
-            const row = document.createElement("tr");
-            row.innerHTML = `
-                <td>
-                    <strong>${safeText(log.student_name || "Student")}</strong>
-                    <div class="table-subtext">${safeText(log.student_email || "")}</div>
-                </td>
-                <td>${safeText("{{ live_quiz.title if live_quiz else '' }}")}</td>
-                <td>
-                    <strong>${safeText(String(log.event_type || "").replaceAll("_", " "))}</strong>
-                    <div class="table-subtext">${safeText(log.event_description || "")}</div>
-                </td>
-                <td><span class="pill severity-${severityClass(log.flag_level)}">${safeText(log.flag_level || "low")}</span></td>
-                <td>${safeText(log.timestamp || "")}</td>
-                <td><span class="status-badge">Pending</span></td>
-                <td><a class="review-link" href="#">Review</a></td>
-            `;
-            activityTableBody.prepend(row);
-        }
-
-        if (!liveEventList) return;
-        if (liveEventEmpty) {
-            liveEventEmpty.style.display = "none";
-        }
-        liveEventList.style.display = "grid";
-        const card = document.createElement("div");
-        card.className = `live-event-card severity-${severityClass(log.flag_level)}`;
-        card.innerHTML = `
-            <div class="live-event-top">
-                <strong>${safeText(log.student_name || "Student")}</strong>
-                <span class="pill severity-${severityClass(log.flag_level)}">${safeText(log.flag_level || "low")}</span>
-            </div>
-            <p class="live-event-type">${safeText(String(log.event_type || "").replaceAll("_", " "))}</p>
-            <p class="live-event-text">${safeText(log.event_description || "")}</p>
-            <div class="live-event-meta">
-                <span>${safeText(log.timestamp || "")}</span>
-                <span>Flagged</span>
-            </div>
-        `;
-        liveEventList.prepend(card);
-    }
-
     function updateCount() {
+        const activeCount = tiles.size;
+        feedGrid.classList.toggle("single-camera", activeCount <= 1);
         if (feedCount) {
-            feedCount.textContent = `${tiles.size} Live`;
+            feedCount.textContent = `${activeCount} Live`;
+        }
+        const liveCount = document.getElementById("live-student-count");
+        if (liveCount) {
+            liveCount.textContent = `${activeCount} active`;
+        }
+        const placeholder = feedGrid.querySelector(".camera-slot.placeholder");
+        if (placeholder && activeCount > 0) {
+            placeholder.remove();
+        } else if (!placeholder && activeCount === 0) {
+            feedGrid.appendChild(createPlaceholderTile());
         }
     }
 
@@ -355,6 +340,27 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!errorBox) return;
         errorBox.style.display = "block";
         errorBox.textContent = message;
+    }
+
+    function updateLiveDetectionRow(payload) {
+        if (!liveDetectionBody || !payload) return;
+        const attemptId = String(payload.attemptId || payload.attempt_id || "").trim();
+        if (!attemptId) return;
+        const row = liveDetectionBody.querySelector(`[data-attempt-id="${CSS.escape(attemptId)}"]`);
+        if (!row) return;
+
+        const detection = payload.detection || {};
+        const state = String(detection.state || detection.message || "normal").toLowerCase() === "cheat" ? "cheat" : "normal";
+        const level = state === "cheat" ? "high" : "low";
+        const resultCell = row.querySelector(".live-detection-result");
+        const updatedCell = row.querySelector(".live-detection-updated");
+        if (resultCell) {
+            resultCell.textContent = state;
+            resultCell.className = `pill severity-${level} live-detection-result`;
+        }
+        if (updatedCell) {
+            updatedCell.textContent = String(detection.timestamp || payload.timestamp || "now");
+        }
     }
 
     function hideError() {
@@ -368,28 +374,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const card = document.createElement("article");
         card.className = "panel camera-slot";
-        card.style.margin = "0";
-        card.style.padding = "0.65rem";
 
         const name = document.createElement("div");
-        name.style.display = "flex";
-        name.style.justifyContent = "space-between";
-        name.style.alignItems = "center";
-        name.style.gap = "0.5rem";
-        name.style.marginBottom = "0.5rem";
-        name.innerHTML = `<strong style="font-size:0.82rem;line-height:1.2;">${participant.display_name || "Student"}</strong><span class="pill" style="font-size:0.7rem;">Live</span>`;
+        name.className = "camera-slot-head";
+        name.innerHTML = `<strong class="camera-slot-name">${participant.display_name || "Student"}</strong><span class="pill camera-slot-state">Live</span>`;
 
         const video = document.createElement("video");
         video.autoplay = true;
         video.playsInline = true;
-        video.style.width = "100%";
-        video.style.height = "clamp(140px, 22vh, 210px)";
-        video.style.objectFit = "cover";
-        video.style.borderRadius = "10px";
-        video.style.background = "#111827";
+        video.muted = true;
+        video.className = "camera-slot-video";
+
+        const frame = document.createElement("div");
+        frame.className = "camera-slot-frame";
+        frame.appendChild(video);
 
         card.appendChild(name);
-        card.appendChild(video);
+        card.appendChild(frame);
 
         const placeholder = feedGrid.querySelector(".camera-slot.placeholder");
         if (placeholder) {
@@ -407,26 +408,13 @@ document.addEventListener("DOMContentLoaded", () => {
     function createPlaceholderTile() {
         const card = document.createElement("article");
         card.className = "panel camera-slot placeholder";
-        card.style.margin = "0";
-        card.style.padding = "0.65rem";
 
         const head = document.createElement("div");
-        head.style.display = "flex";
-        head.style.justifyContent = "space-between";
-        head.style.alignItems = "center";
-        head.style.gap = "0.5rem";
-        head.style.marginBottom = "0.5rem";
-        head.innerHTML = '<strong style="font-size:0.82rem;line-height:1.2;color:#6b7280;">Waiting for student</strong><span class="pill" style="font-size:0.7rem;opacity:0.85;">Idle</span>';
+        head.className = "camera-slot-head";
+        head.innerHTML = '<strong class="camera-slot-name idle">Waiting for student</strong><span class="pill camera-slot-state">Idle</span>';
 
         const body = document.createElement("div");
-        body.style.width = "100%";
-        body.style.height = "clamp(140px, 22vh, 210px)";
-        body.style.borderRadius = "10px";
-        body.style.background = "#111827";
-        body.style.display = "grid";
-        body.style.placeItems = "center";
-        body.style.color = "#ffffff";
-        body.style.fontSize = "0.78rem";
+        body.className = "camera-slot-frame";
         body.innerHTML = '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.95;"><path d="M23 7l-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>';
 
         card.appendChild(head);
@@ -470,6 +458,9 @@ document.addEventListener("DOMContentLoaded", () => {
         pc.ontrack = (event) => {
             const tile = ensureTile(participant);
             tile.video.srcObject = event.streams[0];
+            tile.video.play().catch(() => {
+                // Autoplay may still be blocked until the browser grants playback.
+            });
         };
 
         pc.onicecandidate = (event) => {
@@ -504,20 +495,6 @@ document.addEventListener("DOMContentLoaded", () => {
         participants.set(participant.sid, participant);
         if (participant.role !== "user") return;
 
-        const attemptKey = participant.attempt_id || participant.sid;
-        const existing = studentsByAttempt.get(attemptKey) || {};
-        studentsByAttempt.set(attemptKey, {
-            ...existing,
-            attempt_id: participant.attempt_id || attemptKey,
-            student_name: participant.display_name || existing.student_name || "Student",
-            student_email: participant.email || existing.student_email || "",
-            camera_on: !!participant.camera_on,
-            detection_status: existing.detection_status || "Waiting for detection",
-            flag_level: existing.flag_level || "low",
-            updated_at: existing.updated_at || "",
-        });
-        renderStudentRows();
-
         if (participant.camera_on) {
             createPeerForStudent(participant);
         } else {
@@ -542,63 +519,21 @@ document.addEventListener("DOMContentLoaded", () => {
         syncParticipant(participant);
     });
 
+    socket.on("detection_update", (payload) => {
+        if (!payload || payload.quizId !== quizId) return;
+        updateLiveDetectionRow(payload);
+    });
+
     socket.on("participant_left", (payload) => {
         const sid = (payload || {}).sid;
         if (!sid) return;
-        const participant = participants.get(sid);
-        if (participant) {
-            const attemptKey = participant.attempt_id || sid;
-            studentsByAttempt.delete(attemptKey);
-            renderStudentRows();
-        }
         participants.delete(sid);
         closePeer(sid);
     });
 
-    socket.on("monitor_students_snapshot", (payload) => {
-        const students = (payload && payload.students) || [];
-        studentsByAttempt.clear();
-        students.forEach((student) => {
-            const key = student.attempt_id || student.sid;
-            studentsByAttempt.set(key, {
-                attempt_id: student.attempt_id || key,
-                student_name: student.display_name || "Student",
-                student_email: student.email || "",
-                camera_on: !!student.camera_on,
-                detection_status: "Waiting for detection",
-                flag_level: "low",
-                updated_at: "",
-            });
-        });
-        renderStudentRows();
-    });
-
-    socket.on("detection_update", (payload) => {
+    socket.on("monitor_status_report", (payload) => {
         if (!payload || payload.quizId !== quizId) return;
-        const key = payload.attemptId || payload.studentEmail || payload.studentName;
-        if (!key) return;
-        const current = studentsByAttempt.get(key) || {
-            attempt_id: payload.attemptId || key,
-            student_name: payload.studentName || "Student",
-            student_email: payload.studentEmail || "",
-        };
-        const detection = payload.detection || {};
-        studentsByAttempt.set(key, {
-            ...current,
-            attempt_id: payload.attemptId || current.attempt_id,
-            student_name: payload.studentName || current.student_name,
-            student_email: payload.studentEmail || current.student_email,
-            camera_on: true,
-            detection_status: detection.message || "Detection update",
-            flag_level: detection.flag_level || (detection.state === "suspicious" ? "medium" : "low"),
-            updated_at: detection.timestamp || current.updated_at || "",
-        });
-        renderStudentRows();
-    });
-
-    socket.on("activity_log_created", (payload) => {
-        if (!payload || payload.quizId !== quizId) return;
-        appendActivityRows(payload.log || null);
+        showError(`${payload.studentName || "Student"}: ${payload.message || "Camera issue detected."}`);
     });
 
     socket.on("webrtc_answer", async (payload) => {
@@ -629,7 +564,7 @@ document.addEventListener("DOMContentLoaded", () => {
         showError(message);
     });
 
-    renderStudentRows();
+    updateCount();
 
     window.addEventListener("beforeunload", () => {
         peers.forEach((_, sid) => closePeer(sid));

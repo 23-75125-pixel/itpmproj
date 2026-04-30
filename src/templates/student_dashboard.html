@@ -1,14 +1,15 @@
 {% extends "base.html" %}
 {% block title %}SEMCDS | Student Dashboard{% endblock %}
 {% block content %}
-<section class="page-head">
+<div class="student-dashboard dashboard-page">
+<section class="page-head student-head">
     <div>
         <h1>Welcome back, {{ user.full_name.split(' ')[0] }}!</h1>
         <p class="subhead">Here's your learning progress</p>
     </div>
 </section>
 
-<section class="activity-stats-grid student-stats-grid">
+<section class="student-kpi-grid student-stats-grid">
     <article class="stat-card">
         <div class="stat-icon rose" style="display: flex; align-items: center; justify-content: center;">
             <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -64,25 +65,27 @@
 </section>
 
 <section class="two-column student-progress-grid">
-    <article class="panel">
+    <article class="panel student-performance-panel min-w-0">
         <div class="panel-head">
             <div>
                 <h2>Recent Performance</h2>
             </div>
         </div>
-        <div class="student-chart">
-            {% for item in summary.performance %}
-            <div class="student-bar-group">
-                <div class="student-bar-track">
-                    <div class="student-bar-fill" data-height="{{ item.percentage }}"></div>
+        <div class="student-chart-scroll">
+            <div class="student-chart">
+                {% for item in summary.performance %}
+                <div class="student-bar-group">
+                    <div class="student-bar-track">
+                        <div class="student-bar-fill" data-height="{{ item.percentage }}"></div>
+                    </div>
+                    <span>{{ item.short_label }}</span>
                 </div>
-                <span>{{ item.short_label }}</span>
+                {% endfor %}
             </div>
-            {% endfor %}
         </div>
     </article>
 
-    <article class="panel">
+    <article class="panel student-performance-summary-panel min-w-0">
         <div class="panel-head">
             <div>
                 <h2>Performance</h2>
@@ -110,7 +113,7 @@
     </div>
 </section>
 
-<section class="student-list-section">
+<section class="student-list-section student-list-section-available">
     <h2>Available Quizzes</h2>
     <div class="stack-list">
         {% for quiz in open_quiz_list %}
@@ -125,7 +128,7 @@
     </div>
 </section>
 
-<section class="student-list-section">
+<section class="student-list-section student-list-section-history">
     <h2>Quiz History</h2>
     <div class="stack-list">
         {% for item in summary.history %}
@@ -156,4 +159,5 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 </script>
+</div>
 {% endblock %}

@@ -68,7 +68,7 @@
                         <a href="{{ url_for('quiz_results', quizId=quiz.id) }}">View Results</a>
                         <form method="post" action="{{ url_for('quiz_action') }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">
-                            <button type="submit" name="action" value="reopen">Reopen Quiz</button>
+                            <button type="submit" name="action" value="reopen">Reopen &amp; Edit</button>
                         </form>
                         <form method="post" action="{{ url_for('quiz_action') }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">

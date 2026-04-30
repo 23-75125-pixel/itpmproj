@@ -287,6 +287,8 @@ document.addEventListener("DOMContentLoaded", () => {
     let detectionTimer = null;
     let detectionInFlight = false;
     let cameraActive = false;
+    const pendingMonitorReports = [];
+    const pendingWebrtcOffers = [];
     const DETECTION_INTERVAL_MS = 900;
     const DETECTION_MAX_FRAME_WIDTH = 960;
     const captureCanvas = document.createElement("canvas");
@@ -306,6 +308,16 @@ document.addEventListener("DOMContentLoaded", () => {
         if (detectionDebugBadge) {
             detectionDebugBadge.textContent = text;
         }
+    }
+
+    function reportMonitorIssue(message, level = "medium", code = "camera_status") {
+        if (!message) return;
+        const payload = { quizId, attemptId, message, level, code };
+        if (socket && socket.connected) {
+            socket.emit("monitor_status_report", payload);
+            return;
+        }
+        pendingMonitorReports.push(payload);
     }
 
     function clearDetections() {
@@ -352,7 +364,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const w = x2 - x1;
             const h = y2 - y1;
 
-            const isNormal = String(det.type || "").toLowerCase() === "normal";
+            const isNormal = String(det.behavior || det.type || "").toLowerCase() === "normal";
             const lineColor = isNormal ? "#22c55e" : "#ef4444";
             const fillColor = isNormal ? "rgba(34, 197, 94, 0.16)" : "rgba(239, 68, 68, 0.16)";
 
@@ -363,7 +375,7 @@ document.addEventListener("DOMContentLoaded", () => {
             overlayCtx.lineWidth = 2;
             overlayCtx.strokeRect(x1, y1, w, h);
 
-            const label = `${det.label || det.type || "face"} ${Math.round(Number(det.confidence || 0) * 100)}%`;
+            const label = `${det.raw_label || det.label || det.type || "face"} ${Math.round(Number(det.confidence || 0) * 100)}%`;
             overlayCtx.font = "bold 13px Manrope, sans-serif";
             const textW = overlayCtx.measureText(label).width;
             const textX = Math.max(0, x1);
@@ -385,14 +397,23 @@ document.addEventListener("DOMContentLoaded", () => {
             if (cameraActive) {
                 socket.emit("set_camera_status", { quizId, cameraOn: true });
             }
+            while (pendingMonitorReports.length) {
+                socket.emit("monitor_status_report", pendingMonitorReports.shift());
+            }
         });
 
         socket.on("monitor_error", (payload) => {
-            setStatus((payload || {}).message || "realtime unavailable");
+            const message = (payload || {}).message || "realtime unavailable";
+            setStatus(message);
+            reportMonitorIssue(message, "medium", "realtime_error");
         });
 
-        socket.on("webrtc_offer", async (payload) => {
-            if (!cameraActive || !localStream || !payload || !payload.senderSid || !payload.description) {
+        const handleWebrtcOffer = async (payload) => {
+            if (!payload || !payload.senderSid || !payload.description) {
+                return;
+            }
+            if (!cameraActive || !localStream) {
+                pendingWebrtcOffers.push(payload);
                 return;
             }
             const viewerSid = payload.senderSid;
@@ -412,6 +433,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 };
                 pc.onconnectionstatechange = () => {
                     if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+                        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+                            reportMonitorIssue("Camera stream disconnected from the admin monitor.", "medium", "webrtc_stream_disconnected");
+                        }
                         try {
                             pc.close();
                         } catch (_) {
@@ -434,8 +458,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
             } catch (_) {
                 setStatus("connection error");
+                reportMonitorIssue("Unable to connect camera stream to the admin monitor.", "high", "webrtc_connection_error");
             }
-        });
+        };
+
+        socket.on("webrtc_offer", handleWebrtcOffer);
 
         socket.on("webrtc_ice_candidate", async (payload) => {
             const senderSid = payload && payload.senderSid;
@@ -500,17 +527,20 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!response.ok) {
                 setStatus("detection unavailable");
                 setDebugBadge("Model: detection unavailable");
+                reportMonitorIssue("Face detection service is unavailable for this student camera.", "medium", "detection_unavailable");
                 return;
             }
             const payload = await response.json();
             const detail = payload && payload.detection;
             const detections = (payload && payload.detections) || [];
-            if (detail && detail.model_label) {
+            const normalizedState = String((detail && detail.state) || "").toLowerCase();
+            if (detail && (detail.model_label || detail.behavior_label)) {
                 const conf = Math.round(Number(detail.model_confidence || 0) * 100);
-                setDebugBadge(`Model: ${String(detail.model_label)} (${conf}%)`);
+                const label = String(detail.behavior_label || detail.model_label || normalizedState || "unknown");
+                setDebugBadge(`Model: ${label} (${conf}%)`);
             } else if (detections.length > 0) {
                 const top = [...detections].sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0))[0];
-                const label = String(top.label || "unknown");
+                const label = String(top.behavior || top.type || top.raw_label || top.label || normalizedState || "unknown");
                 const conf = Math.round(Number(top.confidence || 0) * 100);
                 setDebugBadge(`Model: ${label} (${conf}%)`);
             } else {
@@ -521,15 +551,18 @@ document.addEventListener("DOMContentLoaded", () => {
                 setStatus("live");
                 return;
             }
-            if (detail.state === "normal") {
+            if (normalizedState === "normal") {
                 setStatus("live (normal)");
+            } else if (normalizedState === "cheat") {
+                setStatus("live (cheat)");
             } else {
-                setStatus(`live (${detail.message || "suspicious"})`);
+                setStatus(`live (${detail.message || "normal"})`);
             }
         } catch (_) {
             setStatus("detection request failed");
             setDebugBadge("Model: detection failed");
             clearDetections();
+            reportMonitorIssue("Student camera detection request failed.", "medium", "detection_request_failed");
         } finally {
             detectionInFlight = false;
         }
@@ -541,6 +574,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             setStatus("camera API unavailable");
+            reportMonitorIssue("This device does not support the required camera API.", "high", "camera_api_unavailable");
             return;
         }
 
@@ -558,6 +592,13 @@ document.addEventListener("DOMContentLoaded", () => {
             
             cameraActive = true;
             setStatus("live");
+
+            if (pendingWebrtcOffers.length) {
+                const queuedOffers = pendingWebrtcOffers.splice(0, pendingWebrtcOffers.length);
+                queuedOffers.forEach((offer) => {
+                    handleWebrtcOffer(offer);
+                });
+            }
             
             if (socket && socket.connected) {
                 socket.emit("set_camera_status", { quizId, cameraOn: true });
@@ -576,11 +617,13 @@ document.addEventListener("DOMContentLoaded", () => {
             waitForVideoMetadata();
         } catch (_) {
             setStatus("camera permission denied");
+            reportMonitorIssue("Camera permission was denied or the camera could not be started.", "high", "camera_permission_denied");
         }
     }
 
     function stopCameraMonitoring(disconnectSocket = false) {
         cameraActive = false;
+        pendingWebrtcOffers.length = 0;
         if (detectionTimer) {
             window.clearInterval(detectionTimer);
             detectionTimer = null;

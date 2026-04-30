@@ -35,12 +35,12 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind-overrides.css') }}">
 </head>
-<body class="bg-gray-50 text-gray-900">
+<body class="bg-gray-50 text-gray-900 min-h-screen {% if current_role %}app-layout overflow-hidden{% endif %}">
     {% if current_role %}
-    <div class="flex h-screen relative">
-        <div id="mobile-sidebar-overlay" class="fixed inset-0 z-40 bg-gray-900/40 hidden lg:hidden" aria-hidden="true"></div>
+    <div class="app-shell relative flex min-h-screen lg:h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-white to-rose-50/40">
+        <div id="mobile-sidebar-overlay" class="fixed inset-0 z-40 bg-slate-900/55 hidden lg:hidden" aria-hidden="true"></div>
         <!-- Sidebar -->
-        <aside id="app-sidebar" class="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-y-auto scrollbar-hide fixed inset-y-0 left-0 z-50 transform -translate-x-full transition-transform duration-200 ease-out lg:static lg:inset-auto lg:translate-x-0 lg:z-auto">
+        <aside id="app-sidebar" class="app-sidebar w-72 shrink-0 bg-white/95 backdrop-blur border-r border-gray-200 flex flex-col overflow-hidden fixed inset-y-0 left-0 z-50 transform -translate-x-full transition-transform duration-200 ease-out lg:translate-x-0 lg:z-20">
             <!-- Brand -->
             <a href="{{ url_for('home') }}" class="flex items-center gap-3.5 px-5 py-5 border-b border-gray-200 hover:bg-gray-50 transition">
                 <span class="w-14 h-14 flex items-center justify-center bg-white rounded-xl ring-4 ring-gold-light shadow-sm">
@@ -77,7 +77,7 @@
             </p>
 
             <!-- Navigation -->
-            <nav class="flex-1 px-3.5 space-y-1.5">
+            <nav class="flex-1 min-h-0 overflow-y-auto scrollbar-hide px-3.5 pb-4 space-y-1.5">
                 {% if current_role == 'admin' %}
                 <a href="{{ url_for('dashboard') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'dashboard' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
                     <span class="w-5 text-center text-base leading-none">◫</span><span class="text-[15px] leading-none">Dashboard</span>
@@ -88,11 +88,14 @@
                 <a href="{{ url_for('create_quiz') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'create_quiz' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
                     <span class="w-5 text-center text-base leading-none">⊕</span><span class="text-[15px] leading-none">Create Quiz</span>
                 </a>
-                <a href="{{ url_for('activity_monitor') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'activity_monitor' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
+                <a href="{{ url_for('activity_monitor') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'activity_monitor' and request.args.get('live') != '1' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
                     <span class="w-5 text-center text-base leading-none">∿</span><span class="text-[15px] leading-none">Monitor Activity</span>
                 </a>
+                <a href="{{ url_for('activity_monitor', live=1) }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'activity_monitor' and request.args.get('live') == '1' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
+                    <span class="w-5 text-center text-base leading-none">L</span><span class="text-[15px] leading-none">Live View</span>
+                </a>
                 <a href="{{ url_for('user_management') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'user_management' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
-                    <span class="w-5 text-center text-base leading-none">◌</span><span class="text-[15px] leading-none">Users</span>
+                    <span class="w-5 text-center text-base leading-none">◌</span><span class="text-[15px] leading-none">User Management</span>
                 </a>
                 {% else %}
                 <a href="{{ url_for('student_dashboard') }}" class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border {% if current_endpoint == 'student_dashboard' %}bg-rose-800 text-white font-semibold border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200{% else %}text-gray-700 border-transparent hover:bg-rose-800 hover:text-white hover:border-rose-800{% endif %} transition">
@@ -105,7 +108,7 @@
             </nav>
 
             <!-- Footer -->
-            <div class="border-t border-gray-200 px-4 py-4 space-y-3">
+            <div class="shrink-0 border-t border-gray-200 bg-white/95 backdrop-blur px-4 py-4 space-y-3">
                 <div class="flex items-center gap-3 px-1.5">
                     <div class="w-10 h-10 flex items-center justify-center bg-white border-2 border-rose-800 text-rose-800 rounded-full shrink-0" aria-hidden="true">
                         <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -118,26 +121,34 @@
                         <p class="text-xs text-gray-500 truncate">{{ current_user.email }}</p>
                     </div>
                 </div>
-                <a href="{{ url_for('logout') }}" class="w-full inline-flex items-center justify-center px-3.5 py-2.5 text-sm font-medium text-white bg-rose-800 border border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200 rounded-xl transition">
+                <button id="logout-btn" type="button" class="w-full inline-flex items-center justify-center px-3.5 py-2.5 text-sm font-medium text-white bg-rose-800 border border-rose-800 hover:bg-rose-100 hover:text-rose-800 hover:border-rose-200 rounded-xl transition">
                     ↪ Logout
-                </a>
+                </button>
             </div>
         </aside>
 
         <!-- Main Content -->
-        <main class="flex-1 overflow-y-auto">
-            <div class="sticky top-0 z-30 border-b border-gray-200 bg-white px-4 py-3 lg:hidden">
-                <button id="mobile-sidebar-toggle" type="button" class="inline-flex items-center justify-center rounded-lg border border-gray-200 p-2.5 text-gray-700 hover:bg-gray-100" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
-                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <line x1="3" y1="6" x2="21" y2="6"></line>
-                        <line x1="3" y1="12" x2="21" y2="12"></line>
-                        <line x1="3" y1="18" x2="21" y2="18"></line>
-                    </svg>
-                </button>
+        <main class="app-main relative flex-1 min-w-0 flex flex-col overflow-hidden">
+            <div class="sticky top-0 z-30 border-b border-gray-200 bg-white/95 backdrop-blur px-4 py-3 lg:hidden">
+                <div class="flex items-center justify-between gap-3">
+                    <button id="mobile-sidebar-toggle" type="button" class="inline-flex items-center justify-center rounded-lg border border-gray-200 p-2.5 text-gray-700 hover:bg-gray-100" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <line x1="3" y1="6" x2="21" y2="6"></line>
+                            <line x1="3" y1="12" x2="21" y2="12"></line>
+                            <line x1="3" y1="18" x2="21" y2="18"></line>
+                        </svg>
+                    </button>
+                    <div class="min-w-0 text-right">
+                        <p class="text-xs uppercase tracking-wide text-gray-500">{{ 'Instructor' if current_role == 'admin' else 'Student' }}</p>
+                        <p class="text-sm font-semibold text-gray-900 truncate">{{ current_user.full_name }}</p>
+                    </div>
+                </div>
             </div>
-            <div class="max-w-7xl mx-auto p-6 md:p-8">
-                {% block content %}{% endblock %}
-            </div>
+            <section id="app-content-scroll" class="app-content-scroll flex-1 overflow-y-auto overscroll-contain">
+                <div class="app-content-container mx-auto w-full p-4 sm:p-6 lg:p-8">
+                    {% block content %}{% endblock %}
+                </div>
+            </section>
         </main>
     </div>
     <script>
@@ -162,6 +173,12 @@
 
         overlay.addEventListener("click", () => setOpen(false));
 
+        document.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                setOpen(false);
+            }
+        });
+
         sidebar.querySelectorAll("a").forEach((link) => {
             link.addEventListener("click", () => {
                 if (window.innerWidth < 1024) {
@@ -175,6 +192,100 @@
                 setOpen(false);
             }
         });
+    });
+    </script>
+
+    <!-- Logout Confirmation Modal -->
+    <div id="logout-confirm-modal" class="fixed inset-0 z-[9999] hidden flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 scale-100 opacity-100 transition">
+            <div class="text-center mb-6">
+                <div class="mx-auto w-14 h-14 bg-rose-100 rounded-full flex items-center justify-center mb-4">
+                    <svg class="w-8 h-8 text-rose-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4v2m0-10a10 10 0 110 20 10 10 0 010-20z"></path></svg>
+                </div>
+                <h3 class="text-xl font-bold text-gray-900 mb-2">Are you sure?</h3>
+                <p class="text-gray-600">Are you sure you want to log out?</p>
+            </div>
+            <div class="flex gap-3">
+                <button id="logout-cancel-btn" type="button" class="flex-1 px-4 py-2.5 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 transition">
+                    Cancel
+                </button>
+                <a id="logout-confirm-btn" href="{{ url_for('logout') }}" class="flex-1 px-4 py-2.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 transition text-center">
+                    Logout
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Login Success Modal -->
+    <div id="login-success-modal" class="fixed inset-0 z-[9999] hidden flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 text-center">
+            <div class="mx-auto w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+                <svg class="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+            </div>
+            <h3 class="text-2xl font-bold text-gray-900 mb-2">Welcome!</h3>
+            <p class="text-gray-600 mb-6">You have logged in successfully.</p>
+            <p class="text-sm text-gray-500">Redirecting...</p>
+        </div>
+    </div>
+
+    <!-- Logout Success Modal -->
+    <div id="logout-success-modal" class="fixed inset-0 z-[9999] hidden flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 text-center">
+            <div class="mx-auto w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-4">
+                <svg class="w-10 h-10 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.658 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+            </div>
+            <h3 class="text-2xl font-bold text-gray-900 mb-2">See you soon!</h3>
+            <p class="text-gray-600 mb-6">You have logged out successfully.</p>
+            <p class="text-sm text-gray-500">Redirecting...</p>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener("DOMContentLoaded", () => {
+        const logoutBtn = document.getElementById("logout-btn");
+        const logoutConfirmModal = document.getElementById("logout-confirm-modal");
+        const logoutCancelBtn = document.getElementById("logout-cancel-btn");
+        const loginSuccessModal = document.getElementById("login-success-modal");
+        const logoutSuccessModal = document.getElementById("logout-success-modal");
+
+        // Logout button click handler
+        if (logoutBtn) {
+            logoutBtn.addEventListener("click", (e) => {
+                e.preventDefault();
+                logoutConfirmModal.classList.remove("hidden");
+            });
+        }
+
+        // Cancel logout
+        if (logoutCancelBtn) {
+            logoutCancelBtn.addEventListener("click", () => {
+                logoutConfirmModal.classList.add("hidden");
+            });
+        }
+
+        // Close modal on escape key
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                logoutConfirmModal.classList.add("hidden");
+            }
+        });
+
+        // Check for login success from URL parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get("login_success") === "1") {
+            loginSuccessModal.classList.remove("hidden");
+            setTimeout(() => {
+                window.location.href = "{{ url_for('home') }}";
+            }, 2000);
+        }
+
+        // Check for logout success from URL parameter
+        if (urlParams.get("logout_success") === "1") {
+            logoutSuccessModal.classList.remove("hidden");
+            setTimeout(() => {
+                window.location.href = "{{ url_for('login') }}";
+            }, 2000);
+        }
     });
     </script>
     {% else %}

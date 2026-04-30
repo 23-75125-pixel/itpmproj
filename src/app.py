@@ -6,10 +6,12 @@ import base64
 import json
 import os
 import re
+import secrets
 import ssl
 import smtplib
 from email.message import EmailMessage
 from io import BytesIO
+from collections import Counter
 from datetime import datetime, timedelta
 from functools import wraps
 from urllib import error as urllib_error
@@ -17,7 +19,8 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 import numpy as np
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pypdf import PdfReader
 
 try:
@@ -65,10 +68,12 @@ from .data import (
     quiz_attempts,
     quiz_access_state,
     quiz_flags,
+    parse_schedule,
     schedule_status,
     student_dashboard_summary,
     student_attempts,
     submit_quiz_attempt,
+    set_user_password,
     verify_password,
     set_quiz_status,
 )
@@ -80,17 +85,81 @@ MIN_CONFIDENCE_DETECTION = 0.20
 MIN_FACE_AREA_RATIO = 0.05
 MAX_FACE_AREA_RATIO = 0.60
 CENTER_MARGIN_RATIO = 0.25
-DETECTION_INFER_CONFIDENCE = 0.35
+DETECTION_INFER_CONFIDENCE = 0.15
 DETECTION_INFER_IOU = 0.45
 DETECTION_INFER_IMGSZ = 416
 DETECTION_INFER_MAX_DET = 3
-DETECTION_CLASS_NORMAL_MIN_CONF = 0.35
-DETECTION_CLASS_CHEAT_MIN_CONF = 0.60
-DETECTION_CLASS_MARGIN = 0.08
+DETECTION_CLASS_NORMAL_MIN_CONF = 0.30
+DETECTION_CLASS_CHEAT_MIN_CONF = 0.55
+DETECTION_CLASS_MARGIN = 0.06
+DETECTION_CLASS_DRAW_MIN_CONF = 0.15
+DETECTION_CLASS_CHEAT_STRICT_MIN_CONF = 0.70
 
 socketio = SocketIO(cors_allowed_origins="*", async_mode="threading") if SocketIO else None
 _monitor_rooms: dict[str, dict[str, dict]] = {}
 _detection_event_cache: dict[str, datetime] = {}
+_password_reset_code_store: dict[str, dict] = {}
+_shared_session: dict[str, str] = {}  # Stores shared session: {"user_id": "", "role": ""}
+
+
+def extract_checkpoint_labels(model_path: Path) -> list[str]:
+    """Best-effort label extraction from a corrupted Ultralytics checkpoint."""
+    if not model_path.exists():
+        return []
+
+    try:
+        raw_bytes = model_path.read_bytes()
+    except OSError:
+        return []
+
+    names_anchor = raw_bytes.find(b"names")
+    if names_anchor < 0:
+        return []
+
+    window = raw_bytes[names_anchor:names_anchor + 512]
+    labels: list[str] = []
+    marker = b"X"
+    cursor = 0
+
+    while cursor < len(window):
+        marker_index = window.find(marker, cursor)
+        if marker_index < 0 or marker_index + 5 > len(window):
+            break
+
+        raw_length = window[marker_index + 1:marker_index + 5]
+        text_length = int.from_bytes(raw_length, "little", signed=False)
+        text_start = marker_index + 5
+        text_end = text_start + text_length
+        cursor = marker_index + 1
+
+        if text_length <= 0 or text_end > len(window):
+            continue
+
+        candidate_bytes = window[text_start:text_end]
+        if not re.fullmatch(rb"[A-Za-z_][A-Za-z0-9_]{1,31}", candidate_bytes):
+            continue
+
+        label = candidate_bytes.decode("ascii", errors="ignore").strip().lower()
+        if label in {
+            "names",
+            "save",
+            "train",
+            "model",
+            "data",
+            "detect",
+            "task",
+            "mode",
+            "args",
+            "epochs",
+            "time",
+            "patience",
+            "batch",
+            "imgsz",
+        }:
+            continue
+        if label not in labels:
+            labels.append(label)
+    return labels
 
 
 def classify_face_detection(
@@ -131,12 +200,55 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["SECRET_KEY"] = "semcds-demo-secret"
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+    app.config["PREFERRED_URL_SCHEME"] = "https"  # Use https by default for ngrok
+    app.config["SESSION_COOKIE_SECURE"] = os.getenv("FLASK_ENV", "development") == "production"
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # Allow cross-site access
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
     init_database()
 
     if socketio:
-        socketio.init_app(app, manage_session=False)
+        socketio.init_app(app, manage_session=False, cors_allowed_origins="*")
+
+    def redirect_to(endpoint, **kwargs):
+        """Redirect to an endpoint using relative URLs to preserve the current host.
+        This ensures redirects work correctly whether accessed via localhost or ngrok URL."""
+        return redirect(url_for(endpoint, **kwargs, _external=False))
+
+    @app.before_request
+    def auto_login_from_shared_session():
+        """Automatically login if shared session exists and user is not already logged in."""
+        if "user_id" not in session and _shared_session.get("user_id"):
+            session["user_id"] = _shared_session["user_id"]
+            session["role"] = _shared_session["role"]
+            session.permanent = True
+
+    @app.after_request
+    def disable_static_cache(response):
+        if app.debug or os.getenv("FLASK_ENV", "development") != "production":
+            if request.endpoint == "static" and response.status_code == 200:
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+                response.headers.pop("ETag", None)
+                response.headers.pop("Last-Modified", None)
+        return response
+
+    @app.get("/favicon.ico")
+    def favicon():
+        favicon_svg = """<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">
+  <rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#8a1538\"/>
+  <path d=\"M20 16 L24 8 L40 8 L44 16 Q48 20 48 28 L16 28 Q16 20 20 16\" fill=\"#ffffff\"/>
+  <circle cx=\"32\" cy=\"38\" r=\"14\" fill=\"#f7efcf\"/>
+  <path d=\"M25 38 Q32 44 39 38\" stroke=\"#8a1538\" stroke-width=\"2.5\" fill=\"none\" stroke-linecap=\"round\"/>
+</svg>"""
+        return Response(favicon_svg, mimetype="image/svg+xml")
 
     detection_model = None
+    detection_model_error: str | None = None
+    detection_model_labels = extract_checkpoint_labels(DETECTION_MODEL_PATH)
+    password_reset_serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+    password_reset_salt = "password-reset"
+    password_reset_token_max_age = int(os.environ.get("PASSWORD_RESET_TOKEN_MAX_AGE", "3600"))
 
     def _should_log_detection_event(attempt_id: str, event_key: str, cooldown_seconds: int = 8) -> bool:
         cache_key = f"{attempt_id}:{event_key}"
@@ -154,25 +266,72 @@ def create_app() -> Flask:
         return True
 
     def get_detection_model():
-        nonlocal detection_model
+        nonlocal detection_model, detection_model_error
         if detection_model is not None:
             return detection_model
+        if detection_model_error:
+            raise RuntimeError(detection_model_error)
         if YOLO is None:
-            raise RuntimeError("Ultralytics YOLO is not installed. Install the required dependencies and restart the server.")
+            detection_model_error = "Ultralytics YOLO is not installed. Install the required dependencies and restart the server."
+            raise RuntimeError(detection_model_error)
         if not DETECTION_MODEL_PATH.exists():
-            raise RuntimeError(f"YOLO model not found at {DETECTION_MODEL_PATH}")
-        detection_model = YOLO(str(DETECTION_MODEL_PATH))
+            detection_model_error = f"YOLO model not found at {DETECTION_MODEL_PATH}"
+            raise RuntimeError(detection_model_error)
+        try:
+            detection_model = YOLO(str(DETECTION_MODEL_PATH))
+        except Exception as exc:
+            labels_hint = f" Embedded labels: {', '.join(detection_model_labels)}." if detection_model_labels else ""
+            detection_model_error = f"Unable to load YOLO model from {DETECTION_MODEL_PATH.name}: {exc}.{labels_hint}"
+            raise RuntimeError(detection_model_error) from exc
         return detection_model
+
+    def get_detection_runtime_status() -> tuple[bool, str]:
+        try:
+            get_detection_model()
+            labels_hint = f" Labels: {', '.join(detection_model_labels)}." if detection_model_labels else ""
+            return True, f"Monitoring model ready: {DETECTION_MODEL_PATH.name}.{labels_hint}"
+        except RuntimeError as exc:
+            return False, str(exc)
 
     def _is_google_oauth_configured() -> bool:
         return bool(os.environ.get("GOOGLE_CLIENT_ID", "").strip() and os.environ.get("GOOGLE_CLIENT_SECRET", "").strip())
+
+    def _is_local_host(hostname: str) -> bool:
+        host = (hostname or "").strip().lower()
+        return host.startswith("localhost") or host.startswith("127.0.0.1")
+
+    def _current_external_callback_uri() -> str:
+        """Build callback URI from forwarded headers so ngrok devices never redirect to localhost."""
+        forwarded_proto = (request.headers.get("X-Forwarded-Proto", "") or "").split(",")[0].strip().lower()
+        forwarded_host = (request.headers.get("X-Forwarded-Host", "") or "").split(",")[0].strip()
+
+        scheme = forwarded_proto or request.scheme or "https"
+        host = forwarded_host or request.host
+
+        # Normalize default ports to avoid redirect_uri mismatch.
+        if scheme == "https" and host.endswith(":443"):
+            host = host[:-4]
+        elif scheme == "http" and host.endswith(":80"):
+            host = host[:-3]
+
+        callback_path = url_for("google_callback", _external=False)
+        return f"{scheme}://{host}{callback_path}"
 
     def _get_google_oauth_config():
         client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
         client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
         if not client_id or not client_secret:
             raise RuntimeError("Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
-        redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", url_for("google_callback", _external=True))
+
+        configured_redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
+        dynamic_redirect_uri = _current_external_callback_uri()
+        current_host_is_local = _is_local_host(request.host)
+
+        if current_host_is_local and configured_redirect_uri:
+            redirect_uri = configured_redirect_uri
+        else:
+            redirect_uri = dynamic_redirect_uri
+
         return client_id, client_secret, redirect_uri
 
     def _authorize_google(role: str) -> str:
@@ -284,6 +443,164 @@ def create_app() -> Flask:
         finally:
             smtp_client.quit()
 
+    def _send_password_reset_email(recipient_email: str, reset_url: str) -> None:
+        smtp_host = os.environ.get("SMTP_HOST", "").strip()
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+        smtp_user = os.environ.get("SMTP_USER", "").strip()
+        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+        smtp_from = os.environ.get("SMTP_FROM", smtp_user or "noreply@example.com").strip()
+        if not smtp_host or not smtp_user or not smtp_password:
+            raise RuntimeError("Email sending is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASSWORD.")
+
+        message = EmailMessage()
+
+        effective_sender = smtp_from
+        if "gmail.com" in smtp_host.lower() or "googlemail.com" in smtp_host.lower():
+            effective_sender = smtp_user
+            if smtp_from.lower() != smtp_user.lower():
+                message["Reply-To"] = smtp_from
+
+        message["From"] = effective_sender
+        message["To"] = recipient_email
+        message["Subject"] = "SEMCDS password reset"
+        message.set_content(
+            "\n".join(
+                [
+                    "Hello,",
+                    "",
+                    "We received a request to reset your SEMCDS password.",
+                    f"Reset your password using this link: {reset_url}",
+                    "",
+                    "This link expires in 60 minutes.",
+                    "If you did not request a reset, you can ignore this email.",
+                ]
+            )
+        )
+
+        context = ssl.create_default_context()
+        if smtp_port == 465:
+            smtp_client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context)
+        else:
+            smtp_client = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
+        try:
+            if smtp_port != 465:
+                smtp_client.ehlo()
+                smtp_client.starttls(context=context)
+                smtp_client.ehlo()
+            smtp_client.login(smtp_user, smtp_password)
+            smtp_client.send_message(message, from_addr=effective_sender)
+        except smtplib.SMTPAuthenticationError as exc:
+            raise RuntimeError(
+                "SMTP authentication failed. If you are using Gmail, set SMTP_USER to the Gmail address "
+                "and SMTP_PASSWORD to a Google App Password."
+            ) from exc
+        except smtplib.SMTPSenderRefused as exc:
+            raise RuntimeError(
+                "SMTP rejected the sender address. Set SMTP_FROM to the same mailbox as SMTP_USER, "
+                "or use a sender allowed by your mail provider."
+            ) from exc
+        except smtplib.SMTPException as exc:
+            raise RuntimeError(f"SMTP error while sending password reset email: {exc}") from exc
+        finally:
+            smtp_client.quit()
+
+    def _send_password_reset_code_email(recipient_email: str, reset_code: str) -> None:
+        smtp_host = os.environ.get("SMTP_HOST", "").strip()
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+        smtp_user = os.environ.get("SMTP_USER", "").strip()
+        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+        smtp_from = os.environ.get("SMTP_FROM", smtp_user or "noreply@example.com").strip()
+        if not smtp_host or not smtp_user or not smtp_password:
+            raise RuntimeError("Email sending is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASSWORD.")
+
+        message = EmailMessage()
+
+        effective_sender = smtp_from
+        if "gmail.com" in smtp_host.lower() or "googlemail.com" in smtp_host.lower():
+            effective_sender = smtp_user
+            if smtp_from.lower() != smtp_user.lower():
+                message["Reply-To"] = smtp_from
+
+        message["From"] = effective_sender
+        message["To"] = recipient_email
+        message["Subject"] = "SEMCDS password reset code"
+        message.set_content(
+            "\n".join(
+                [
+                    "Hello,",
+                    "",
+                    "We received a request to reset your SEMCDS password.",
+                    f"Your 6-digit reset code is: {reset_code}",
+                    "",
+                    "This code expires in 10 minutes.",
+                    "If you did not request a reset, you can ignore this email.",
+                ]
+            )
+        )
+
+        context = ssl.create_default_context()
+        if smtp_port == 465:
+            smtp_client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context)
+        else:
+            smtp_client = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
+        try:
+            if smtp_port != 465:
+                smtp_client.ehlo()
+                smtp_client.starttls(context=context)
+                smtp_client.ehlo()
+            smtp_client.login(smtp_user, smtp_password)
+            smtp_client.send_message(message, from_addr=effective_sender)
+        except smtplib.SMTPAuthenticationError as exc:
+            raise RuntimeError(
+                "SMTP authentication failed. If you are using Gmail, set SMTP_USER to the Gmail address "
+                "and SMTP_PASSWORD to a Google App Password."
+            ) from exc
+        except smtplib.SMTPSenderRefused as exc:
+            raise RuntimeError(
+                "SMTP rejected the sender address. Set SMTP_FROM to the same mailbox as SMTP_USER, "
+                "or use a sender allowed by your mail provider."
+            ) from exc
+        except smtplib.SMTPException as exc:
+            raise RuntimeError(f"SMTP error while sending password reset code email: {exc}") from exc
+        finally:
+            smtp_client.quit()
+
+    def _purge_stale_password_reset_codes(ttl_seconds: int) -> None:
+        cutoff = datetime.now() - timedelta(seconds=ttl_seconds * 2)
+        stale_emails = []
+        for email, payload in _password_reset_code_store.items():
+            sent_at = payload.get("sent_at")
+            if not isinstance(sent_at, datetime):
+                stale_emails.append(email)
+                continue
+            if sent_at < cutoff:
+                stale_emails.append(email)
+        for email in stale_emails:
+            _password_reset_code_store.pop(email, None)
+
+    def _build_password_reset_token(user: dict) -> str:
+        return password_reset_serializer.dumps(
+            {"user_id": user.get("id", ""), "email": user.get("email", "")},
+            salt=password_reset_salt,
+        )
+
+    def _read_password_reset_token(token: str) -> dict | None:
+        try:
+            payload = password_reset_serializer.loads(
+                token,
+                salt=password_reset_salt,
+                max_age=password_reset_token_max_age,
+            )
+        except (BadSignature, SignatureExpired):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        user_id = str(payload.get("user_id", "")).strip()
+        email = str(payload.get("email", "")).strip().lower()
+        if not user_id or not email:
+            return None
+        return {"user_id": user_id, "email": email}
+
     def decode_image_from_data_url(data_url: str) -> np.ndarray | None:
         if not data_url.startswith("data:image"):
             return None
@@ -297,6 +614,14 @@ def create_app() -> Flask:
 
     def normalize_schedule_input(raw_value: str) -> str:
         return raw_value.replace("T", " ").strip()
+
+    def compute_time_limit_minutes(scheduled_start: str, scheduled_end: str, fallback_minutes: int = 15) -> int:
+        start = parse_schedule(scheduled_start)
+        end = parse_schedule(scheduled_end)
+        if start and end and end > start:
+            minutes = int((end - start).total_seconds() // 60)
+            return max(1, minutes)
+        return max(1, fallback_minutes)
 
     def blank_quiz() -> dict:
         return {
@@ -718,9 +1043,9 @@ def create_app() -> Flask:
             def wrapped(*args, **kwargs):
                 role = session.get("role")
                 if not role:
-                    return redirect(url_for("login"))
+                    return redirect_to("login")
                 if role not in allowed_roles:
-                    return redirect(url_for("home"))
+                    return redirect_to("home")
                 return view(*args, **kwargs)
 
             return wrapped
@@ -730,7 +1055,7 @@ def create_app() -> Flask:
     @app.route("/")
     def index():
         if session.get("role") in {"admin", "user"}:
-            return redirect(url_for("home"))
+            return redirect_to("home")
         return render_template(
             "login.html",
             selected_role="admin",
@@ -762,7 +1087,10 @@ def create_app() -> Flask:
                 session["role"] = user["role"]
                 session["user_id"] = user["id"]
                 session.permanent = remember_me
-                return redirect(url_for("home"))
+                # Store in shared session for other PCs on same ngrok URL
+                _shared_session["user_id"] = user["id"]
+                _shared_session["role"] = user["role"]
+                return redirect(url_for("home", login_success="1"))
 
         return render_template(
             "login.html",
@@ -777,11 +1105,11 @@ def create_app() -> Flask:
         if role not in {"admin", "user"}:
             role = "user"
         if not _is_google_oauth_configured():
-            return redirect(url_for("login", role=role, error="Google OAuth is not configured."))
+            return redirect_to("login", role=role, error="Google OAuth is not configured.")
         try:
             return redirect(_authorize_google(role))
         except RuntimeError as exc:
-            return redirect(url_for("login", role=role, error=str(exc)))
+            return redirect_to("login", role=role, error=str(exc))
 
     @app.route("/google-callback")
     def google_callback():
@@ -790,41 +1118,39 @@ def create_app() -> Flask:
         if role not in {"admin", "user"}:
             role = "user"
         if not code:
-            return redirect(url_for("login", role=role, error="Google login failed."))
+            return redirect_to("login", role=role, error="Google login failed.")
         try:
             profile = _fetch_google_user_info(code)
         except Exception as exc:
-            return redirect(url_for("login", role=role, error=str(exc)))
+            return redirect_to("login", role=role, error=str(exc))
 
         email = (profile.get("email") or "").strip().lower()
         full_name = (profile.get("name") or profile.get("given_name") or email).strip()
         if not email:
-            return redirect(url_for("login", role=role, error="Google did not return a valid email address."))
+            return redirect_to("login", role=role, error="Google did not return a valid email address.")
 
         user = get_user_by_email(email)
         if user and user["role"] != role:
-            return redirect(url_for("login", role=role, error="Your Google account does not match the selected portal."))
+            return redirect_to("login", role=role, error="Your Google account does not match the selected portal.")
 
         if not user:
             if role == "admin":
-                return redirect(
-                    url_for(
-                        "login",
-                        role=role,
-                        error="This instructor Google account is not authorized. Only registered instructor accounts can sign in.",
-                    )
-                )
-            return redirect(
-                url_for(
+                return redirect_to(
                     "login",
                     role=role,
-                    error="This student Google account is not invited yet. Ask your instructor to send an invitation first.",
+                    error="This instructor Google account is not authorized. Only registered instructor accounts can sign in.",
                 )
+            return redirect_to(
+                "login",
+                role=role,
+                error="This student Google account is not invited yet. Ask your instructor to send an invitation first.",
             )
 
         session["role"] = role
         session["user_id"] = user["id"]
-        return redirect(url_for("home"))
+        _shared_session["user_id"] = user["id"]
+        _shared_session["role"] = role
+        return redirect(url_for("home", login_success="1"))
 
     @app.route("/send-invitations", methods=["POST"])
     @role_required("admin")
@@ -872,37 +1198,192 @@ def create_app() -> Flask:
     @app.route("/forgot-password", methods=["GET", "POST"])
     def forgot_password():
         message = ""
+        error = ""
+        email_value = request.values.get("email", "").strip().lower()
+        resend_remaining_seconds = 0
+        password_reset_code_ttl_seconds = int(os.environ.get("PASSWORD_RESET_CODE_TTL_SECONDS", "600"))
+        resend_cooldown_seconds = 60
+
+        _purge_stale_password_reset_codes(password_reset_code_ttl_seconds)
+
         if request.method == "POST":
-            email = request.form.get("email", "").strip()
+            email = request.form.get("email", "").strip().lower()
+            action = request.form.get("action", "send_code").strip().lower()
+            email_value = email
             user = get_user_by_email(email)
-            if user:
-                message = f"Password reset instructions were sent to {user['email']}."
+
+            reset_record = _password_reset_code_store.get(email)
+            now = datetime.now()
+
+            if action == "send_code":
+                if user and reset_record and isinstance(reset_record.get("sent_at"), datetime):
+                    elapsed_seconds = int((now - reset_record["sent_at"]).total_seconds())
+                    if elapsed_seconds < resend_cooldown_seconds:
+                        resend_remaining_seconds = resend_cooldown_seconds - elapsed_seconds
+                        error = f"Please wait {resend_remaining_seconds}s before requesting a new code."
+
+                if not error and user:
+                    reset_code = f"{secrets.randbelow(1000000):06d}"
+                    _password_reset_code_store[email] = {
+                        "code": reset_code,
+                        "user_id": user["id"],
+                        "sent_at": now,
+                        "expires_at": now + timedelta(seconds=password_reset_code_ttl_seconds),
+                    }
+                    try:
+                        _send_password_reset_code_email(user["email"], reset_code)
+                    except RuntimeError as exc:
+                        error = str(exc)
+                    except Exception as exc:
+                        error = f"Unable to send reset code email right now. ({exc})"
+
+                if not error:
+                    message = "If the email exists in the system, a 6-digit reset code was sent."
+
             else:
-                message = "If the email exists in the system, password reset instructions were sent."
-        return render_template("forgot_password.html", message=message)
+                code = request.form.get("code", "").strip()
+                password = request.form.get("password", "")
+                confirm_password = request.form.get("confirm_password", "")
+
+                if not email or not code or not password or not confirm_password:
+                    error = "Please complete all fields to reset your password."
+                elif len(code) != 6 or not code.isdigit():
+                    error = "Enter a valid 6-digit reset code."
+                elif not user:
+                    error = "Invalid email or reset code."
+                elif not reset_record:
+                    error = "Reset code not found or expired. Request a new code."
+                elif reset_record.get("user_id") != user.get("id"):
+                    error = "Invalid reset request. Please request a new code."
+                elif not isinstance(reset_record.get("expires_at"), datetime) or now > reset_record["expires_at"]:
+                    _password_reset_code_store.pop(email, None)
+                    error = "Reset code has expired. Request a new code."
+                elif str(reset_record.get("code", "")) != code:
+                    error = "Invalid reset code."
+                elif len(password) < 8:
+                    error = "Password must be at least 8 characters long."
+                elif password != confirm_password:
+                    error = "Passwords do not match."
+                elif not set_user_password(user["id"], password):
+                    error = "Unable to reset password right now. Please try again."
+                else:
+                    _password_reset_code_store.pop(email, None)
+                    return redirect(
+                        url_for(
+                            "login",
+                            message="Password reset successful. You can now sign in with your new password.",
+                            role=user.get("role", "admin"),
+                        )
+                    )
+
+            active_record = _password_reset_code_store.get(email)
+            if user and active_record and isinstance(active_record.get("sent_at"), datetime):
+                elapsed_seconds = int((datetime.now() - active_record["sent_at"]).total_seconds())
+                if elapsed_seconds < resend_cooldown_seconds:
+                    resend_remaining_seconds = max(resend_cooldown_seconds - elapsed_seconds, 0)
+
+        return render_template(
+            "forgot_password.html",
+            message=message,
+            error=error,
+            email_value=email_value,
+            resend_remaining_seconds=resend_remaining_seconds,
+        )
+
+    @app.route("/reset-password/<token>", methods=["GET", "POST"])
+    def reset_password(token: str):
+        token_payload = _read_password_reset_token(token)
+        if not token_payload:
+            return render_template(
+                "reset_password.html",
+                token_valid=False,
+                error="This password reset link is invalid or has expired.",
+                success_message="",
+                token=token,
+            )
+
+        user = get_user_by_id(token_payload["user_id"])
+        if not user or user.get("email", "").strip().lower() != token_payload["email"]:
+            return render_template(
+                "reset_password.html",
+                token_valid=False,
+                error="This password reset link is invalid or has expired.",
+                success_message="",
+                token=token,
+            )
+
+        error = ""
+        success_message = ""
+        if request.method == "POST":
+            password = request.form.get("password", "")
+            confirm_password = request.form.get("confirm_password", "")
+
+            if len(password) < 8:
+                error = "Password must be at least 8 characters long."
+            elif password != confirm_password:
+                error = "Passwords do not match."
+            elif not set_user_password(user["id"], password):
+                error = "Unable to reset password right now. Please try again."
+            else:
+                return redirect(
+                    url_for(
+                        "login",
+                        message="Password reset successful. You can now sign in with your new password.",
+                        role=user.get("role", "admin"),
+                    )
+                )
+
+        return render_template(
+            "reset_password.html",
+            token_valid=True,
+            error=error,
+            success_message=success_message,
+            token=token,
+        )
 
     @app.route("/signin/<role>")
     def signin(role: str):
         if role not in {"admin", "user"}:
-            return redirect(url_for("login"))
+            return redirect_to("login")
         user = get_user(role)
         session["role"] = role
         session["user_id"] = user["id"]
-        return redirect(url_for("home"))
+        _shared_session["user_id"] = user["id"]
+        _shared_session["role"] = role
+        return redirect_to("home")
 
     @app.route("/logout")
     def logout():
         session.clear()
-        return redirect(url_for("login"))
+        # Clear shared session when logging out
+        _shared_session.clear()
+        return redirect(url_for("login", logout_success="1"))
+
+    @app.route("/api/shared-session", methods=["GET", "POST", "DELETE"])
+    def manage_shared_session():
+        """API to manage shared session for ngrok multi-device access."""
+        if request.method == "GET":
+            # Check if shared session is active
+            return jsonify({
+                "active": bool(_shared_session.get("user_id")),
+                "user_id": _shared_session.get("user_id", ""),
+                "role": _shared_session.get("role", ""),
+            })
+        elif request.method == "DELETE":
+            # Clear shared session
+            _shared_session.clear()
+            session.clear()
+            return jsonify({"success": True, "message": "Shared session cleared"})
+        return jsonify({"error": "Invalid method"}), 405
 
     @app.route("/home")
     def home():
         role = session.get("role")
         if role == "admin":
-            return redirect(url_for("dashboard"))
+            return redirect_to("dashboard")
         if role == "user":
-            return redirect(url_for("student_dashboard"))
-        return redirect(url_for("login"))
+            return redirect_to("student_dashboard")
+        return redirect_to("login")
 
     @app.route("/Dashboard")
     @role_required("admin")
@@ -989,15 +1470,15 @@ def create_app() -> Flask:
             set_quiz_status(quiz_id, "closed")
             message = "Quiz closed successfully."
         elif get_quiz(quiz_id) and action == "reopen":
-            set_quiz_status(quiz_id, "published")
-            message = "Quiz reopened successfully."
+            set_quiz_status(quiz_id, "draft")
+            return redirect_to("create_quiz", quizId=quiz_id)
         elif get_quiz(quiz_id) and action == "delete":
             delete_quiz_by_id(quiz_id)
             message = "Quiz deleted successfully."
         else:
             message = "Action could not be completed."
 
-        return redirect(url_for("quiz_manager", message=message))
+        return redirect_to("quiz_manager", message=message)
 
     @app.route("/CreateQuiz/AIPreview", methods=["POST"])
     @role_required("admin")
@@ -1035,10 +1516,14 @@ def create_app() -> Flask:
             title = request.form.get("title", "").strip()
             description = request.form.get("description", "").strip()
             subject = request.form.get("subject", "").strip()
-            time_limit_minutes = int(request.form.get("time_limit_minutes", "15") or 15)
             quiz_code = request.form.get("quiz_code", "").strip().upper() or f"QUIZ-{datetime.now().strftime('%H%M%S')}"
             scheduled_start = normalize_schedule_input(request.form.get("scheduled_start", ""))
             scheduled_end = normalize_schedule_input(request.form.get("scheduled_end", ""))
+            time_limit_minutes = compute_time_limit_minutes(
+                scheduled_start,
+                scheduled_end,
+                int(request.form.get("time_limit_minutes", "15") or 15),
+            )
             monitoring_enabled = request.form.get("monitoring_enabled") == "on"
             questions_payload = json.loads(request.form.get("questions_payload", "[]") or "[]")
 
@@ -1057,7 +1542,7 @@ def create_app() -> Flask:
                 questions_payload=questions_payload,
             )
             message = "Quiz published successfully." if action == "publish" else "Draft saved successfully."
-            return redirect(url_for("quiz_manager", message=message))
+            return redirect_to("quiz_manager", message=message)
 
         quiz_id = request.args.get("quizId", "").strip()
         sample_quiz = get_quiz(quiz_id) if quiz_id else None
@@ -1075,7 +1560,7 @@ def create_app() -> Flask:
     def quiz_results():
         quizzes = get_quizzes()
         if not quizzes:
-            return redirect(url_for("quiz_manager", message="Create a quiz first before viewing results."))
+            return redirect_to("quiz_manager", message="Create a quiz first before viewing results.")
         quiz_id = request.args.get("quizId", quizzes[0]["id"])
         quiz = get_quiz(quiz_id) or quizzes[0]
         attempts = quiz_attempts(quiz["id"])
@@ -1098,17 +1583,35 @@ def create_app() -> Flask:
     @app.route("/ActivityMonitor")
     @role_required("admin")
     def activity_monitor():
-        quiz_id = request.args.get("quizId", "all")
+        requested_quiz_id = request.args.get("quizId", "").strip()
         live_quiz_id = request.args.get("liveQuizId", "").strip()
         live_mode = request.args.get("live") == "1"
         severity = request.args.get("severity", "all")
         reviewed = request.args.get("reviewed", "all")
         search = request.args.get("student", "").lower().strip()
+        selected_student_email = request.args.get("studentEmail", "").strip().lower()
         all_quizzes = get_quizzes()
+        monitorable_quizzes = [
+            quiz for quiz in all_quizzes
+            if quiz.get("status") == "published" and quiz.get("monitoring_enabled")
+        ]
+
+        preferred_quiz = next(
+            (quiz for quiz in monitorable_quizzes if schedule_status(quiz) == "open"),
+            None,
+        )
+        if not preferred_quiz:
+            preferred_quiz = monitorable_quizzes[0] if monitorable_quizzes else (all_quizzes[0] if all_quizzes else None)
+
+        valid_quiz_ids = {quiz["id"] for quiz in all_quizzes}
+        if requested_quiz_id and requested_quiz_id != "all" and requested_quiz_id not in valid_quiz_ids:
+            requested_quiz_id = ""
+
+        quiz_id = requested_quiz_id or (preferred_quiz["id"] if preferred_quiz else "all")
         filtered_logs = []
         for quiz in all_quizzes:
             filtered_logs.extend(quiz_flags(quiz["id"]))
-        if quiz_id != "all":
+        if quiz_id and quiz_id != "all":
             filtered_logs = [flag for flag in filtered_logs if flag["quiz_id"] == quiz_id]
         if severity != "all":
             filtered_logs = [flag for flag in filtered_logs if flag["flag_level"] == severity]
@@ -1116,9 +1619,114 @@ def create_app() -> Flask:
             expected = reviewed == "reviewed"
             filtered_logs = [flag for flag in filtered_logs if flag["reviewed"] == expected]
         if search:
-            filtered_logs = [flag for flag in filtered_logs if search in flag["student_name"].lower()]
+            filtered_logs = [
+                flag for flag in filtered_logs
+                if search in flag["student_name"].lower() or search in flag["student_email"].lower()
+            ]
 
-        active_quiz = get_quiz(quiz_id) if quiz_id != "all" else (all_quizzes[0] if all_quizzes else None)
+        student_options_map: dict[str, dict] = {}
+        for flag in filtered_logs:
+            student_email = str(flag.get("student_email", "")).strip().lower()
+            student_name = str(flag.get("student_name", "Unknown Student")).strip() or "Unknown Student"
+            if not student_email:
+                student_email = f"unknown:{student_name.lower()}"
+            if student_email not in student_options_map:
+                student_options_map[student_email] = {
+                    "student_email": str(flag.get("student_email", "")).strip(),
+                    "student_name": student_name,
+                }
+        student_options = sorted(
+            student_options_map.values(),
+            key=lambda item: (item["student_name"].lower(), item["student_email"].lower()),
+        )
+
+        if selected_student_email and selected_student_email not in student_options_map:
+            selected_student_email = ""
+
+        if selected_student_email:
+            filtered_logs = [
+                flag for flag in filtered_logs
+                if (str(flag.get("student_email", "")).strip().lower() or f"unknown:{str(flag.get('student_name', '')).strip().lower()}") == selected_student_email
+            ]
+
+        quiz_lookup = {quiz["id"]: quiz for quiz in (monitorable_quizzes or all_quizzes)}
+        severity_rank = {"low": 1, "medium": 2, "high": 3}
+        student_activity_map: dict[str, dict] = {}
+        for flag in filtered_logs:
+            student_email = str(flag.get("student_email", "")).strip().lower()
+            student_name = str(flag.get("student_name", "Unknown Student")).strip() or "Unknown Student"
+            student_key = student_email or f"unknown:{student_name.lower()}"
+            quiz_title = quiz_lookup.get(flag["quiz_id"], {}).get("title", flag["quiz_id"])
+            event_label = str(flag.get("event_type", "")).replace("_", " ").title() or "Activity Event"
+            entry = student_activity_map.setdefault(
+                student_key,
+                {
+                    "student_name": student_name,
+                    "student_email": str(flag.get("student_email", "")).strip(),
+                    "event_count": 0,
+                    "quiz_ids": set(),
+                    "highest_level": "low",
+                    "last_activity": "",
+                    "latest_event": "",
+                    "latest_quiz": "",
+                    "reviewed_count": 0,
+                    "pending_count": 0,
+                    "event_counter": Counter(),
+                },
+            )
+            entry["event_count"] += 1
+            entry["quiz_ids"].add(flag["quiz_id"])
+            entry["event_counter"][event_label] += 1
+            if flag.get("reviewed"):
+                entry["reviewed_count"] += 1
+            else:
+                entry["pending_count"] += 1
+            current_rank = severity_rank.get(flag.get("flag_level", "low"), 1)
+            saved_rank = severity_rank.get(entry["highest_level"], 1)
+            if current_rank >= saved_rank:
+                entry["highest_level"] = flag.get("flag_level", "low")
+            if not entry["last_activity"]:
+                entry["last_activity"] = flag.get("timestamp", "")
+                entry["latest_event"] = str(flag.get("event_type", "")).replace("_", " ").title()
+                entry["latest_quiz"] = quiz_title
+
+        student_activity_rows = sorted(
+            [
+                {
+                    **item,
+                    "quiz_count": len(item["quiz_ids"]),
+                    "event_tallies": item["event_counter"].most_common(3),
+                }
+                for item in student_activity_map.values()
+            ],
+            key=lambda item: (
+                -severity_rank.get(item["highest_level"], 1),
+                -item["event_count"],
+                item["student_name"].lower(),
+            ),
+        )
+
+        selected_student = next(
+            (row for row in student_activity_rows if (row["student_email"].strip().lower() or f"unknown:{row['student_name'].lower()}") == selected_student_email),
+            None,
+        )
+
+        if live_quiz_id and live_quiz_id not in valid_quiz_ids:
+            live_quiz_id = ""
+
+        if not live_quiz_id:
+            preferred_live_quiz = get_quiz(quiz_id) if quiz_id and quiz_id != "all" else preferred_quiz
+            if preferred_live_quiz:
+                live_quiz_id = preferred_live_quiz["id"]
+            else:
+                in_progress_quiz = next(
+                    (quiz for quiz in monitorable_quizzes if any(attempt["status"] == "in_progress" for attempt in quiz_attempts(quiz["id"]))),
+                    None,
+                )
+                if in_progress_quiz:
+                    live_quiz_id = in_progress_quiz["id"]
+
+        active_quiz = get_quiz(quiz_id) if quiz_id and quiz_id != "all" else preferred_quiz
         active_students = [attempt for attempt in quiz_attempts(active_quiz["id"]) if attempt["status"] == "in_progress"] if active_quiz else []
         live_quiz = get_quiz(live_quiz_id) if live_quiz_id else None
         live_logs = quiz_flags(live_quiz["id"]) if live_quiz else []
@@ -1144,7 +1752,7 @@ def create_app() -> Flask:
                     "student_name": attempt.get("student_name", "Student"),
                     "student_email": attempt.get("student_email", ""),
                     "camera_on": False,
-                    "detection_status": latest.get("description") or "No detection yet",
+                    "detection_status": latest.get("event") or "normal",
                     "flag_level": latest.get("flag_level", "low"),
                     "updated_at": latest.get("timestamp") or attempt.get("started_at", ""),
                 }
@@ -1154,7 +1762,12 @@ def create_app() -> Flask:
             "activity_monitor.html",
             stats=activity_stats(),
             logs=filtered_logs,
-            quizzes=all_quizzes,
+            student_activity_rows=student_activity_rows,
+            student_options=student_options,
+            selected_student=selected_student,
+            selected_student_email=selected_student_email,
+            quiz_lookup=quiz_lookup,
+            quizzes=monitorable_quizzes or all_quizzes,
             selected_quiz=quiz_id,
             selected_severity=severity,
             selected_reviewed=reviewed,
@@ -1188,7 +1801,12 @@ def create_app() -> Flask:
     @app.route("/StudentCamera")
     @role_required("user")
     def student_camera():
-        return render_template("student_camera.html")
+        detection_available, detection_message = get_detection_runtime_status()
+        return render_template(
+            "student_camera.html",
+            detection_available=detection_available,
+            detection_message=detection_message,
+        )
 
     @app.route("/detect-face", methods=["POST"])
     @role_required("user")
@@ -1215,76 +1833,105 @@ def create_app() -> Flask:
                 verbose=False,
             )[0]
             detections = []
+            confident_detections = []
             model_has_classification = bool(getattr(model, "names", None))
 
-            def resolve_detection_type(label: str) -> tuple[str | None, str | None]:
+            def resolve_detection_type(label: str) -> str | None:
                 normalized_label = label.strip().lower()
-                if normalized_label == "normal":
-                    return "normal", None
-                if normalized_label == "cheat":
-                    return "cheating", "cheat"
-                return None, None
+                if normalized_label == "normal" or normalized_label.startswith("normal_"):
+                    return "normal"
+                if normalized_label == "cheat" or normalized_label == "cheating":
+                    return "cheat"
+                if normalized_label.startswith("cheat_") or normalized_label.startswith("cheating_"):
+                    return "cheat"
+                return None
             
             for box in results.boxes:
                 coords = box.xyxy[0].cpu().numpy().tolist()
                 confidence = float(box.conf[0].cpu().item())
                 class_id = int(box.cls[0].cpu().item())
-                label = str(model.names.get(class_id, class_id))
-                detection_type, cheating_reason = resolve_detection_type(label)
+                raw_label = str(model.names.get(class_id, class_id))
+                detection_type = resolve_detection_type(raw_label)
                 if not detection_type:
                     continue
 
-                min_class_conf = DETECTION_CLASS_CHEAT_MIN_CONF if detection_type == "cheating" else DETECTION_CLASS_NORMAL_MIN_CONF
+                if confidence < DETECTION_CLASS_DRAW_MIN_CONF:
+                    continue
+
+                detection_payload = {
+                    "bbox": [coords[0], coords[1], coords[2], coords[3]],
+                    "confidence": confidence,
+                    "label": raw_label,
+                    "raw_label": raw_label,
+                    "behavior": detection_type,
+                    "type": detection_type,
+                }
+                detections.append(detection_payload)
+
+                min_class_conf = DETECTION_CLASS_CHEAT_MIN_CONF if detection_type == "cheat" else DETECTION_CLASS_NORMAL_MIN_CONF
                 if confidence < min_class_conf:
                     continue
 
-                detections.append(
-                    {
-                        "bbox": [coords[0], coords[1], coords[2], coords[3]],
-                        "confidence": confidence,
-                        "label": label,
-                        "type": detection_type,
-                        "cheating_reason": cheating_reason if detection_type == "cheating" else None,
-                    }
-                )
+                confident_detections.append(detection_payload)
 
             if detections and model_has_classification:
                 detections.sort(key=lambda item: float(item.get("confidence", 0)), reverse=True)
+            if confident_detections and model_has_classification:
+                confident_detections.sort(key=lambda item: float(item.get("confidence", 0)), reverse=True)
                     
         except Exception as exc:
-            return jsonify({"error": f"Detection failed: {exc}"}), 500
+            return jsonify(
+                {
+                    "error": f"Detection failed: {exc}",
+                    "modelPath": str(DETECTION_MODEL_PATH),
+                }
+            ), 500
 
         normal_count = sum(1 for item in detections if item.get("type") == "normal")
         cheating_count = len(detections) - normal_count
-        suspicious_reason = None
-        suspicious_description = ""
+        result_state = "normal"
+        result_message = "normal"
         flag_level = "low"
-        event_type = "face_detected"
-        top_detection = detections[0] if detections else None
-        top_cheat_conf = max((float(item.get("confidence", 0)) for item in detections if item.get("type") == "cheating"), default=0.0)
-        top_normal_conf = max((float(item.get("confidence", 0)) for item in detections if item.get("type") == "normal"), default=0.0)
+        event_type = "normal"
+        top_detection = confident_detections[0] if confident_detections else (detections[0] if detections else None)
+        top_cheat_conf = max((float(item.get("confidence", 0)) for item in confident_detections if item.get("type") == "cheat"), default=0.0)
+        top_normal_conf = max((float(item.get("confidence", 0)) for item in confident_detections if item.get("type") == "normal"), default=0.0)
+        confident_cheat_count = sum(1 for item in confident_detections if item.get("type") == "cheat")
+        confident_normal_count = sum(1 for item in confident_detections if item.get("type") == "normal")
+        selected_detection = top_detection
+
+        cheat_is_dominant = (
+            top_cheat_conf >= DETECTION_CLASS_CHEAT_STRICT_MIN_CONF
+            and top_cheat_conf >= (top_normal_conf + DETECTION_CLASS_MARGIN)
+            and confident_cheat_count >= max(1, confident_normal_count)
+        )
 
         if not detections:
-            suspicious_reason = "no_face"
-            suspicious_description = "No confident face classification yet."
+            result_state = "normal"
+            result_message = "normal"
             flag_level = "low"
-            event_type = "no_face_detected"
-        elif top_cheat_conf > 0 and top_cheat_conf >= (top_normal_conf + DETECTION_CLASS_MARGIN):
-            suspicious_reason = str(top_detection.get("cheating_reason") or "cheat")
-            suspicious_description = f"Suspicious face detection: {suspicious_reason.replace('_', ' ')}."
+        elif not confident_detections:
+            result_state = "normal"
+            result_message = "normal"
+            flag_level = "low"
+        elif cheat_is_dominant:
+            result_state = "cheat"
+            result_message = "cheat"
             flag_level = "high"
-            event_type = f"detection_{suspicious_reason}"
         else:
-            suspicious_description = "Face detected normally."
+            result_state = "normal"
+            result_message = "normal"
+            selected_detection = next((item for item in confident_detections if item.get("type") == "normal"), top_detection)
 
         detection_status = {
-            "state": "normal" if not suspicious_reason else "suspicious",
-            "reason": suspicious_reason,
-            "message": suspicious_description,
+            "state": result_state,
+            "reason": None,
+            "message": result_message,
             "normal_count": normal_count,
             "suspicious_count": cheating_count,
-            "model_label": (top_detection or {}).get("label", ""),
-            "model_confidence": float((top_detection or {}).get("confidence", 0.0)),
+            "model_label": (selected_detection or {}).get("raw_label", (selected_detection or {}).get("label", "")),
+            "behavior_label": (selected_detection or {}).get("behavior", (selected_detection or {}).get("type", "")),
+            "model_confidence": float((selected_detection or {}).get("confidence", 0.0)),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "flag_level": flag_level,
         }
@@ -1314,12 +1961,12 @@ def create_app() -> Flask:
             )
 
         created_log = None
-        if valid_attempt and _should_log_detection_event(attempt_id, event_type):
+        if valid_attempt and event_type == "cheat" and _should_log_detection_event(attempt_id, event_type):
             created_log = create_activity_log(
                 quiz_id=quiz_id,
                 attempt_id=attempt_id,
                 event_type=event_type,
-                event_description=suspicious_description,
+                event_description=result_message,
                 flag_level=flag_level,
             )
             if socketio:
@@ -1360,7 +2007,7 @@ def create_app() -> Flask:
         quiz_id = request.values.get("quizId", "").strip()
         quiz = get_quiz(quiz_id) if quiz_id else None
         if not quiz:
-            return redirect(url_for("student_dashboard"))
+            return redirect_to("student_dashboard")
         access_allowed, access_message = quiz_access_state(quiz, session.get("user_id", ""))
         user = get_user_by_id(session.get("user_id", "")) or get_user("user")
         submitted = False
@@ -1382,11 +2029,13 @@ def create_app() -> Flask:
             if not attempt_id:
                 attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], consent_given)
             attempt_id = finalize_quiz_attempt(attempt_id, answers, consent_given)
-            return redirect(url_for("take_quiz", quizId=quiz["id"], submitted=1, attemptId=attempt_id))
+            return redirect_to("take_quiz", quizId=quiz["id"], submitted=1, attemptId=attempt_id)
 
         if request.args.get("submitted") == "1":
             submitted = True
             attempt = get_attempt(request.args.get("attemptId", ""))
+
+        detection_available, detection_message = get_detection_runtime_status()
 
         return render_template(
             "take_quiz.html",
@@ -1400,6 +2049,8 @@ def create_app() -> Flask:
             realtime_enabled=bool(socketio),
             current_user_name=(user or {}).get("full_name", "Student"),
             active_attempt_id=active_attempt_id,
+            detection_available=detection_available,
+            detection_message=detection_message,
         )
 
     @app.route("/UserManagement")
@@ -1515,16 +2166,6 @@ def create_app() -> Flask:
             if participant.get("role") != "user":
                 camera_on = False
 
-            if camera_on:
-                active_students = sum(
-                    1
-                    for item in participants.values()
-                    if item.get("role") == "user" and bool(item.get("camera_on", False))
-                )
-                if not participant.get("camera_on") and active_students >= 10:
-                    emit("monitor_error", {"message": "Camera limit reached (max 10 students)."}, to=request.sid)
-                    return
-
             participant["camera_on"] = camera_on
             emit("participant_updated", participant_payload(participant), room=room_name(quiz_id))
             emit_monitor_student_snapshot(quiz_id)
@@ -1590,6 +2231,57 @@ def create_app() -> Flask:
                 },
                 to=target_sid,
             )
+
+        @socketio.on("monitor_status_report")
+        def on_monitor_status_report(data):
+            quiz_id = str((data or {}).get("quizId", "")).strip()
+            if not quiz_id:
+                return
+
+            participants = room_participants(quiz_id)
+            participant = participants.get(request.sid)
+            if not participant or participant.get("role") != "user":
+                return
+
+            attempt_id = str((data or {}).get("attemptId", "")).strip() or participant.get("attempt_id", "")
+            message = str((data or {}).get("message", "")).strip()
+            code = str((data or {}).get("code", "")).strip().lower() or "camera_status"
+            level = str((data or {}).get("level", "")).strip().lower() or "medium"
+            if level not in {"low", "medium", "high"}:
+                level = "medium"
+            if not message:
+                return
+
+            payload = {
+                "quizId": quiz_id,
+                "attemptId": attempt_id,
+                "studentName": participant.get("display_name", "Student"),
+                "studentEmail": participant.get("email", ""),
+                "message": message,
+                "code": code,
+                "level": level,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+            emit("monitor_status_report", payload, room=room_name(quiz_id))
+
+            attempt = get_attempt(attempt_id) if attempt_id else None
+            valid_attempt = bool(attempt and attempt.get("quiz_id") == quiz_id)
+            if valid_attempt and _should_log_detection_event(attempt_id, f"monitor_status:{code}", cooldown_seconds=15):
+                created_log = create_activity_log(
+                    quiz_id=quiz_id,
+                    attempt_id=attempt_id,
+                    event_type=code,
+                    event_description=message,
+                    flag_level=level,
+                )
+                emit(
+                    "activity_log_created",
+                    {
+                        "quizId": quiz_id,
+                        "log": activity_log_with_details(created_log),
+                    },
+                    to=room_name(quiz_id),
+                )
 
         @socketio.on("disconnect")
         def on_disconnect():

@@ -404,6 +404,26 @@ def create_user(email: str, full_name: str, role: str, password: str) -> dict:
     return dict(row) if row else {}
 
 
+def set_user_password(user_id: str, password: str) -> bool:
+    if not user_id:
+        return False
+
+    password_hash = generate_password_hash(password)
+    if using_supabase():
+        existing = _sb_select("users", {"id": user_id})
+        if not existing:
+            return False
+        _sb_update("users", {"password_hash": password_hash}, {"id": user_id})
+        return True
+
+    with get_connection() as connection:
+        result = connection.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (password_hash, user_id),
+        )
+        return result.rowcount > 0
+
+
 def delete_user_by_email(email: str) -> None:
     normalized_email = email.strip().lower()
     if using_supabase():
@@ -1269,6 +1289,8 @@ def schedule_status(quiz: dict, now: datetime | None = None) -> str:
 
 def quiz_access_state(quiz: dict, student_id: str | None = None, now: datetime | None = None) -> tuple[bool, str | None]:
     now = now or datetime.now()
+    if quiz.get("status") != "published":
+        return False, "This quiz is currently closed. Ask your instructor to reopen it."
     start = parse_schedule(quiz.get("scheduled_start"))
     end = parse_schedule(quiz.get("scheduled_end"))
     if start and now < start:
