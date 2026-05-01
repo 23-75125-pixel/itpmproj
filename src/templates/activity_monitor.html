@@ -1,5 +1,238 @@
 {% extends "base.html" %}
 {% block title %}SEMCDS | Activity Monitor{% endblock %}
+{% block head %}
+<style>
+    .activity-filterbar {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1rem;
+    }
+
+    .activity-filter-fields {
+        grid-template-columns:
+            minmax(0, 1.05fr)
+            minmax(0, 1.2fr)
+            minmax(0, 0.9fr)
+            minmax(0, 1fr)
+            minmax(0, 1.4fr);
+        grid-template-areas: "quiz student severity reviewed search";
+    }
+
+    .activity-filter-fields label,
+    .activity-filterbar select,
+    .activity-filterbar .search-shell,
+    .activity-filterbar .search-shell input,
+    .activity-pill-groups,
+    .filter-pills {
+        min-width: 0;
+    }
+
+    .activity-filterbar .button {
+        min-height: 3.2rem;
+    }
+
+    .activity-filter-field-quiz {
+        grid-area: quiz;
+    }
+
+    .activity-filter-field-student {
+        grid-area: student;
+    }
+
+    .activity-filter-field-severity {
+        grid-area: severity;
+    }
+
+    .activity-filter-field-reviewed {
+        grid-area: reviewed;
+    }
+
+    .activity-filter-field-search {
+        grid-area: search;
+    }
+
+    .activity-filterbar .filter-button {
+        min-width: 160px;
+        max-width: 100%;
+        text-align: center;
+        white-space: nowrap;
+        justify-content: center;
+        flex: 0 1 170px;
+    }
+
+    .activity-filterbar .button:disabled {
+        background: #d4a5b7;
+        border-color: #d4a5b7;
+        color: rgba(255, 255, 255, 0.96);
+        cursor: not-allowed;
+        box-shadow: none;
+        opacity: 0.78;
+    }
+
+    .activity-pill-groups {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        width: 100%;
+        padding-top: 0.1rem;
+    }
+
+    .filter-pills {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        width: auto;
+        max-width: 100%;
+        margin-left: auto;
+        justify-content: flex-end;
+    }
+
+    .activity-student-panel,
+    .activity-event-panel,
+    .activity-student-card,
+    .activity-student-panel-head > div:first-child,
+    .activity-event-panel-head > div:first-child,
+    .activity-student-top > div,
+    .activity-student-latest,
+    .activity-student-footer {
+        min-width: 0;
+    }
+
+    .activity-student-top > div,
+    .activity-student-latest,
+    .activity-student-footer,
+    .table-subtext {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    .activity-student-grid.loading {
+        opacity: 0.6;
+        pointer-events: none;
+    }
+
+    .updating-indicator {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #10b981;
+        font-weight: 600;
+    }
+
+    .updating-indicator.hidden {
+        display: none;
+    }
+
+    .updating-pulse {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background-color: #10b981;
+        animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% {
+            opacity: 1;
+            transform: scale(1);
+        }
+        50% {
+            opacity: 0.5;
+            transform: scale(1.2);
+        }
+    }
+
+    @keyframes highlight-update {
+        0% {
+            background-color: #fef3c7;
+            border-color: #fbbf24;
+        }
+        100% {
+            background-color: transparent;
+            border-color: transparent;
+        }
+    }
+
+    .activity-student-card.highlight-update {
+        animation: highlight-update 1.2s ease-out;
+        border: 2px solid #fbbf24;
+    }
+
+    .activity-student-card.new-entry {
+        animation: slideIn 0.3s ease-out;
+    }
+
+    @keyframes slideIn {
+        from {
+            opacity: 0;
+            transform: translateY(-10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @media (max-width: 1399px) {
+        .activity-filter-fields {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-areas:
+                "quiz student search"
+                "severity reviewed search";
+        }
+    }
+
+    @media (max-width: 1099px) {
+        .activity-filter-fields {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-areas:
+                "quiz student"
+                "severity reviewed"
+                "search search";
+        }
+
+        .activity-pill-groups,
+        .filter-pills {
+            justify-content: flex-start;
+        }
+
+        .filter-pills {
+            width: 100%;
+            margin-left: 0;
+        }
+    }
+
+    @media (max-width: 767px) {
+        .activity-filter-fields {
+            grid-template-columns: 1fr;
+            grid-template-areas:
+                "quiz"
+                "student"
+                "severity"
+                "reviewed"
+                "search";
+        }
+
+        .activity-filterbar .filter-button {
+            width: 100%;
+            min-width: 0;
+            flex-basis: 100%;
+        }
+
+        .activity-pill-groups,
+        .filter-pills {
+            width: 100%;
+            justify-content: flex-start;
+        }
+    }
+</style>
+{% endblock %}
 {% block content %}
 <section class="page-head">
     <div>
@@ -24,7 +257,7 @@
             </svg>
         </div>
         <div>
-            <strong>{{ stats.total_flags }}</strong>
+            <strong id="stat-total-flags">{{ stats.total_flags }}</strong>
             <span>Total Events</span>
         </div>
     </article>
@@ -37,7 +270,7 @@
             </svg>
         </div>
         <div>
-            <strong>{{ stats.pending_review }}</strong>
+            <strong id="stat-pending-review">{{ stats.pending_review }}</strong>
             <span>Unreviewed</span>
         </div>
     </article>
@@ -49,7 +282,7 @@
             </svg>
         </div>
         <div>
-            <strong>{{ stats.reviewed }}</strong>
+            <strong id="stat-reviewed">{{ stats.reviewed }}</strong>
             <span>Reviewed</span>
         </div>
     </article>
@@ -59,7 +292,7 @@
     <input type="hidden" name="liveQuizId" value="{{ live_quiz_id }}">
     {% if live_mode %}<input type="hidden" name="live" value="1">{% endif %}
     <div class="activity-filter-fields">
-        <label>
+        <label class="activity-filter-field-quiz">
             Quiz
             <select name="quizId">
                 <option value="all" {% if selected_quiz == 'all' %}selected{% endif %}>All quizzes</option>
@@ -68,7 +301,7 @@
                 {% endfor %}
             </select>
         </label>
-        <label>
+        <label class="activity-filter-field-student">
             Student
             <select name="studentEmail">
                 <option value="" {% if not selected_student_email %}selected{% endif %}>All students</option>
@@ -80,14 +313,7 @@
                 {% endfor %}
             </select>
         </label>
-        <label>
-            Search
-            <div class="search-shell activity-search">
-                <span class="search-icon">⌕</span>
-                <input type="text" name="student" placeholder="Search by student name or email..." value="{{ search }}">
-            </div>
-        </label>
-        <label>
+        <label class="activity-filter-field-severity">
             Level
             <select name="severity">
                 <option value="all" {% if selected_severity == 'all' %}selected{% endif %}>All levels</option>
@@ -96,7 +322,7 @@
                 <option value="low" {% if selected_severity == 'low' %}selected{% endif %}>Low</option>
             </select>
         </label>
-        <label>
+        <label class="activity-filter-field-reviewed">
             Review Status
             <select name="reviewed">
                 <option value="all" {% if selected_reviewed == 'all' %}selected{% endif %}>All statuses</option>
@@ -104,12 +330,24 @@
                 <option value="reviewed" {% if selected_reviewed == 'reviewed' %}selected{% endif %}>Reviewed</option>
             </select>
         </label>
+        <label class="activity-filter-field-search">
+            Search
+            <div class="search-shell activity-search">
+                <span class="search-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="7"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </span>
+                <input type="text" name="student" placeholder="Search..." value="{{ search }}">
+            </div>
+        </label>
     </div>
     <div class="activity-pill-groups">
         <div class="filter-pills">
-            <button class="filter-pill active" type="submit">Apply Filters</button>
+            <button class="button primary filter-button" type="submit" id="apply-filters-btn">Apply Filters</button>
             {% if selected_student_email or search or selected_quiz != 'all' or selected_severity != 'all' or selected_reviewed != 'all' %}
-            <a class="filter-pill" href="{{ url_for('activity_monitor') }}">Clear</a>
+            <a class="button secondary filter-button" href="{{ url_for('activity_monitor') }}">Clear All</a>
             {% endif %}
         </div>
     </div>
@@ -129,17 +367,17 @@
                 </p>
             </div>
             <div class="activity-student-panel-actions">
-                <span class="status-badge">{{ student_activity_rows|length }} student{% if student_activity_rows|length != 1 %}s{% endif %}</span>
+                <span id="student-count-badge" class="status-badge neutral">{{ student_activity_rows|length }} student{% if student_activity_rows|length != 1 %}s{% endif %}</span>
                 {% if selected_student %}
                 <a class="button secondary" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search) }}">Back to students</a>
                 {% endif %}
             </div>
         </div>
         {% if student_activity_rows %}
-        <div class="activity-student-grid">
+        <div class="activity-student-grid" id="student-activity-grid">
             {% for student in student_activity_rows %}
             {% set student_key = student.student_email|lower if student.student_email else 'unknown:' ~ student.student_name|lower %}
-            <a class="activity-student-card" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search, studentEmail=student_key) }}">
+            <a class="activity-student-card" data-student-key="{{ student_key }}" href="{{ url_for('activity_monitor', quizId=selected_quiz, severity=selected_severity, reviewed=selected_reviewed, student=search, studentEmail=student_key) }}">
                 <div class="activity-student-top">
                     <div>
                         <strong>{{ student.student_name }}</strong>
@@ -148,12 +386,12 @@
                     <span class="pill severity-{{ student.highest_level }}">{{ student.highest_level }}</span>
                 </div>
                 <div class="activity-student-metrics">
-                    <span>{{ student.event_count }} events</span>
-                    <span>{{ student.quiz_count }} quizzes</span>
-                    <span>{{ student.pending_count }} pending</span>
-                    <span>{{ student.reviewed_count }} reviewed</span>
+                    <span class="metric events" data-count="{{ student.event_count }}">{{ student.event_count }} events</span>
+                    <span class="metric quizzes" data-count="{{ student.quiz_count }}">{{ student.quiz_count }} quizzes</span>
+                    <span class="metric pending" data-count="{{ student.pending_count }}">{{ student.pending_count }} pending</span>
+                    <span class="metric reviewed" data-count="{{ student.reviewed_count }}">{{ student.reviewed_count }} reviewed</span>
                 </div>
-                <p class="activity-student-latest">{{ student.latest_event }}{% if student.latest_quiz %} in {{ student.latest_quiz }}{% endif %}</p>
+                <p class="activity-student-latest"><span class="latest-event">{{ student.latest_event }}</span>{% if student.latest_quiz %} in <span class="latest-quiz">{{ student.latest_quiz }}</span>{% endif %}</p>
                 {% if student.event_tallies %}
                 <div class="activity-student-tallies">
                     {% for label, count in student.event_tallies %}
@@ -162,15 +400,25 @@
                 </div>
                 {% endif %}
                 <div class="activity-student-footer">
-                    <span>{{ student.last_activity }}</span>
+                    <span class="last-activity">{{ student.last_activity }}</span>
                     <span class="review-link">{% if selected_student %}Viewing all{% else %}View all{% endif %}</span>
                 </div>
             </a>
             {% endfor %}
         </div>
+        <div class="live-empty" id="empty-state" style="display:none;">
+            <p id="empty-state-message">
+                <span id="loading-indicator" style="display:none;">Loading students...</span>
+                <span id="no-students" style="display:inline;">No students are currently taking this quiz, or all were filtered out.</span>
+            </p>
+        </div>
         {% else %}
-        <div class="live-empty">
-            <p>No student activity matched the current filters.</p>
+        <div class="activity-student-grid" id="student-activity-grid" style="display:none;"></div>
+        <div class="live-empty" id="empty-state">
+            <p id="empty-state-message">
+                <span id="loading-indicator" style="display:inline;">Loading students...</span>
+                <span id="no-students" style="display:none;">No students are currently taking this quiz, or all were filtered out.</span>
+            </p>
         </div>
         {% endif %}
     </article>
@@ -182,7 +430,7 @@
                 <h2>All Detected Events</h2>
                 <p class="helper">Full event list for {{ selected_student.student_name }} based on the current filters.</p>
             </div>
-            <span class="status-badge">{{ logs|length }} events</span>
+            <span class="status-badge neutral">{{ logs|length }} events</span>
         </div>
         {% if logs %}
         <div class="table-scroll activity-event-table-wrap">
@@ -201,11 +449,11 @@
                     {% for log in logs %}
                     <tr>
                         <td>{{ quiz_lookup.get(log.quiz_id, {}).get('title', log.quiz_id) }}</td>
-                        <td><strong>{{ log.event_type.replace('_', ' ').title() }}</strong></td>
+                        <td><strong>{{ activity_event_label(log.event_type) }}</strong></td>
                         <td>{{ log.event_description }}</td>
                         <td><span class="pill severity-{{ log.flag_level }}">{{ log.flag_level }}</span></td>
                         <td>{{ log.timestamp }}</td>
-                        <td><span class="status-badge">{{ 'Reviewed' if log.reviewed else 'Pending' }}</span></td>
+                        <td><span class="status-badge {{ review_status_class(log.reviewed) }}">{{ 'Reviewed' if log.reviewed else 'Pending' }}</span></td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -222,6 +470,13 @@
 </section>
 {% endif %}
 
+{% if live_mode and not live_quiz %}
+<section class="panel live-empty" style="margin-top:1rem;">
+    <h2>No Live Quiz Available</h2>
+    <p>No monitored quiz is currently live. Open a published monitored quiz during its schedule window to use Live View.</p>
+</section>
+{% endif %}
+
 {% if live_mode and live_quiz %}
 <section class="live-monitor-workspace" id="live-monitor-modal">
     <aside class="live-drawer live-monitor-workspace-shell">
@@ -233,7 +488,7 @@
                 <section class="panel live-camera-panel live-panel-section">
                     <div class="live-section-head">
                         <h3>Live Camera Feed</h3>
-                        <span id="camera-feed-count" class="status-badge">0 Live</span>
+                        <span id="camera-feed-count" class="status-badge neutral">0 Live</span>
                     </div>
                     <div id="camera-monitoring-error" class="schedule-message blocked live-monitoring-error" style="display:none;"></div>
                     <div id="camera-feed-grid" class="live-camera-grid">
@@ -251,40 +506,6 @@
                         </article>
                     </div>
                 </section>
-                <section class="panel live-panel-section">
-                    <div class="live-section-head">
-                        <h3>Latest Detection Status</h3>
-                        <span id="live-student-count" class="status-badge">{{ live_student_rows|length }} active</span>
-                    </div>
-                    {% if live_student_rows %}
-                    <div class="table-scroll">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Student</th>
-                                    <th>Email</th>
-                                    <th>Result</th>
-                                    <th>Updated</th>
-                                </tr>
-                            </thead>
-                            <tbody id="live-detection-body">
-                                {% for row in live_student_rows %}
-                                <tr data-attempt-id="{{ row.attempt_id }}">
-                                    <td><strong>{{ row.student_name }}</strong></td>
-                                    <td>{{ row.student_email or 'No email available' }}</td>
-                                    <td><span class="pill severity-{{ row.flag_level }} live-detection-result">{{ row.detection_status }}</span></td>
-                                    <td class="live-detection-updated">{{ row.updated_at or 'waiting' }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    {% else %}
-                    <div class="live-empty">
-                        <p>No active student sessions yet.</p>
-                    </div>
-                    {% endif %}
-                </section>
             </div>
         </div>
     </aside>
@@ -299,7 +520,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const feedGrid = document.getElementById("camera-feed-grid");
     const feedCount = document.getElementById("camera-feed-count");
     const errorBox = document.getElementById("camera-monitoring-error");
-    const liveDetectionBody = document.getElementById("live-detection-body");
     if (!quizId || !feedGrid || !window.io) {
         return;
     }
@@ -308,32 +528,57 @@ document.addEventListener("DOMContentLoaded", () => {
     const peers = new Map();
     const tiles = new Map();
     const participants = new Map();
+    const peerRetryTimers = new Map();
 
-    function safeText(value) {
-        return String(value || "")
-            .replaceAll("&", "&amp;")
-            .replaceAll("<", "&lt;")
-            .replaceAll(">", "&gt;")
-            .replaceAll('"', "&quot;")
-            .replaceAll("'", "&#39;");
+    function getStudentParticipants() {
+        return Array.from(participants.values()).filter((participant) => participant && participant.role === "user");
+    }
+
+    function updateGridLayout() {
+        const tileCount = Math.max(getStudentParticipants().length, tiles.size, 1);
+        const gridWidth = Math.max(feedGrid.parentElement ? feedGrid.parentElement.clientWidth : feedGrid.clientWidth, 320);
+        let columns = 1;
+
+        if (tileCount === 2) {
+            columns = 2;
+        } else if (tileCount <= 4) {
+            columns = 2;
+        } else if (tileCount <= 9) {
+            columns = 3;
+        } else if (tileCount <= 16) {
+            columns = 4;
+        } else {
+            columns = 5;
+        }
+
+        const tileMinWidth =
+            tileCount === 1 ? 920 :
+            tileCount === 2 ? 420 :
+            tileCount <= 4 ? 320 :
+            tileCount <= 9 ? 260 :
+            tileCount <= 16 ? 220 : 180;
+        const gapWidth = 14 * Math.max(columns - 1, 0);
+        const desiredWidth = Math.min(gridWidth, columns * tileMinWidth + gapWidth);
+        feedGrid.style.setProperty("--live-grid-columns", String(columns));
+        feedGrid.style.setProperty("--live-tile-min", `${Math.min(tileMinWidth, gridWidth)}px`);
+        feedGrid.style.setProperty("--live-grid-max", `${desiredWidth}px`);
+        feedGrid.dataset.count = String(tileCount);
     }
 
     function updateCount() {
-        const activeCount = tiles.size;
-        feedGrid.classList.toggle("single-camera", activeCount <= 1);
+        const studentCount = getStudentParticipants().length;
+        const liveCameraCount = getStudentParticipants().filter((participant) => participant.camera_on).length;
+        feedGrid.classList.toggle("single-camera", Math.max(studentCount, tiles.size) <= 1);
         if (feedCount) {
-            feedCount.textContent = `${activeCount} Live`;
-        }
-        const liveCount = document.getElementById("live-student-count");
-        if (liveCount) {
-            liveCount.textContent = `${activeCount} active`;
+            feedCount.textContent = studentCount ? `${liveCameraCount} Live / ${studentCount} Joined` : "0 Live";
         }
         const placeholder = feedGrid.querySelector(".camera-slot.placeholder");
-        if (placeholder && activeCount > 0) {
+        if (placeholder && studentCount > 0) {
             placeholder.remove();
-        } else if (!placeholder && activeCount === 0) {
+        } else if (!placeholder && studentCount === 0) {
             feedGrid.appendChild(createPlaceholderTile());
         }
+        updateGridLayout();
     }
 
     function showError(message) {
@@ -342,52 +587,83 @@ document.addEventListener("DOMContentLoaded", () => {
         errorBox.textContent = message;
     }
 
-    function updateLiveDetectionRow(payload) {
-        if (!liveDetectionBody || !payload) return;
-        const attemptId = String(payload.attemptId || payload.attempt_id || "").trim();
-        if (!attemptId) return;
-        const row = liveDetectionBody.querySelector(`[data-attempt-id="${CSS.escape(attemptId)}"]`);
-        if (!row) return;
-
-        const detection = payload.detection || {};
-        const state = String(detection.state || detection.message || "normal").toLowerCase() === "cheat" ? "cheat" : "normal";
-        const level = state === "cheat" ? "high" : "low";
-        const resultCell = row.querySelector(".live-detection-result");
-        const updatedCell = row.querySelector(".live-detection-updated");
-        if (resultCell) {
-            resultCell.textContent = state;
-            resultCell.className = `pill severity-${level} live-detection-result`;
-        }
-        if (updatedCell) {
-            updatedCell.textContent = String(detection.timestamp || payload.timestamp || "now");
-        }
-    }
-
     function hideError() {
         if (!errorBox) return;
         errorBox.style.display = "none";
         errorBox.textContent = "";
     }
 
+    function clearPeerRetry(sid) {
+        const timerId = peerRetryTimers.get(sid);
+        if (timerId) {
+            window.clearTimeout(timerId);
+            peerRetryTimers.delete(sid);
+        }
+    }
+
+    function participantStateText(participant, hasLiveStream = false) {
+        if (hasLiveStream) {
+            return "Live";
+        }
+        return participant.camera_on ? "Connecting" : "Joined";
+    }
+
+    function participantEmptyMessage(participant) {
+        return participant.camera_on
+            ? "Waiting for the live camera stream..."
+            : "Student joined this quiz. Waiting for camera access.";
+    }
+
+    function renderTileState(participant, tile, hasLiveStream = false) {
+        if (!tile) {
+            return;
+        }
+        const liveStream = hasLiveStream && Boolean(tile.video.srcObject);
+        tile.card.dataset.participantSid = participant.sid;
+        tile.nameLabel.textContent = participant.display_name || "Student";
+        tile.nameLabel.classList.toggle("idle", !liveStream);
+        tile.statePill.textContent = participantStateText(participant, liveStream);
+        tile.video.hidden = !liveStream;
+        tile.emptyState.hidden = liveStream;
+        tile.emptyState.textContent = participantEmptyMessage(participant);
+    }
+
     function ensureTile(participant) {
-        if (tiles.has(participant.sid)) return tiles.get(participant.sid);
+        const existingTile = tiles.get(participant.sid);
+        if (existingTile) {
+            renderTileState(participant, existingTile, Boolean(existingTile.video.srcObject));
+            return existingTile;
+        }
 
         const card = document.createElement("article");
         card.className = "panel camera-slot";
+        card.dataset.participantSid = participant.sid;
 
         const name = document.createElement("div");
         name.className = "camera-slot-head";
-        name.innerHTML = `<strong class="camera-slot-name">${participant.display_name || "Student"}</strong><span class="pill camera-slot-state">Live</span>`;
+        const nameLabel = document.createElement("strong");
+        nameLabel.className = "camera-slot-name";
+        nameLabel.textContent = participant.display_name || "Student";
+        const statePill = document.createElement("span");
+        statePill.className = "pill camera-slot-state";
+        statePill.textContent = "Live";
+        name.appendChild(nameLabel);
+        name.appendChild(statePill);
 
         const video = document.createElement("video");
         video.autoplay = true;
         video.playsInline = true;
         video.muted = true;
         video.className = "camera-slot-video";
+        video.hidden = true;
 
         const frame = document.createElement("div");
         frame.className = "camera-slot-frame";
         frame.appendChild(video);
+
+        const emptyState = document.createElement("div");
+        emptyState.className = "camera-slot-empty";
+        frame.appendChild(emptyState);
 
         card.appendChild(name);
         card.appendChild(frame);
@@ -399,8 +675,9 @@ document.addEventListener("DOMContentLoaded", () => {
             feedGrid.appendChild(card);
         }
 
-        const tile = { card, video };
+        const tile = { card, video, nameLabel, statePill, emptyState };
         tiles.set(participant.sid, tile);
+        renderTileState(participant, tile, false);
         updateCount();
         return tile;
     }
@@ -426,38 +703,97 @@ document.addEventListener("DOMContentLoaded", () => {
         const tile = tiles.get(sid);
         if (!tile) return;
         tile.video.srcObject = null;
-        tile.card.replaceWith(createPlaceholderTile());
+        tile.card.remove();
         tiles.delete(sid);
         updateCount();
     }
 
-    function closePeer(sid) {
+    function closePeer(sid, { removeTile: shouldRemoveTile = false } = {}) {
+        clearPeerRetry(sid);
         const pc = peers.get(sid);
         if (pc) {
+            pc.__closingManually = true;
             pc.ontrack = null;
             pc.onicecandidate = null;
             pc.close();
             peers.delete(sid);
         }
+        const tile = tiles.get(sid);
+        if (tile) {
+            tile.video.srcObject = null;
+            tile.video.hidden = true;
+        }
+        if (shouldRemoveTile) {
+            removeTile(sid);
+            return;
+        }
+        const participant = participants.get(sid);
+        if (participant && participant.role === "user") {
+            renderTileState(participant, ensureTile(participant), false);
+            updateCount();
+            return;
+        }
         removeTile(sid);
+    }
+
+    function schedulePeerReconnect(participant, delayMs = 1200) {
+        if (!participant || !participant.sid || !participant.camera_on || peerRetryTimers.has(participant.sid)) {
+            return;
+        }
+
+        const timerId = window.setTimeout(() => {
+            peerRetryTimers.delete(participant.sid);
+            const latestParticipant = participants.get(participant.sid);
+            if (!latestParticipant || latestParticipant.role !== "user" || !latestParticipant.camera_on || peers.has(participant.sid) || !socket.connected) {
+                return;
+            }
+            createPeerForStudent(latestParticipant);
+        }, delayMs);
+
+        peerRetryTimers.set(participant.sid, timerId);
+    }
+
+    function syncSnapshot(snapshotParticipants) {
+        const nextParticipants = new Map();
+        (snapshotParticipants || []).forEach((participant) => {
+            if (participant && participant.sid) {
+                nextParticipants.set(participant.sid, participant);
+            }
+        });
+
+        Array.from(participants.keys()).forEach((sid) => {
+            if (!nextParticipants.has(sid)) {
+                participants.delete(sid);
+                closePeer(sid, { removeTile: true });
+            }
+        });
+
+        nextParticipants.forEach((participant) => syncParticipant(participant));
+        updateCount();
     }
 
     function createPeerForStudent(participant) {
         if (!participant || participant.role !== "user" || !participant.camera_on) return;
         if (peers.has(participant.sid)) return;
 
+        const tile = ensureTile(participant);
+        renderTileState(participant, tile, false);
+
         const pc = new RTCPeerConnection({
             iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
         });
 
+        clearPeerRetry(participant.sid);
         peers.set(participant.sid, pc);
 
         pc.addTransceiver("video", { direction: "recvonly" });
         pc.addTransceiver("audio", { direction: "recvonly" });
 
         pc.ontrack = (event) => {
-            const tile = ensureTile(participant);
+            const latestParticipant = participants.get(participant.sid) || participant;
+            const tile = ensureTile(latestParticipant);
             tile.video.srcObject = event.streams[0];
+            renderTileState(latestParticipant, tile, true);
             tile.video.play().catch(() => {
                 // Autoplay may still be blocked until the browser grants playback.
             });
@@ -473,7 +809,13 @@ document.addEventListener("DOMContentLoaded", () => {
         };
 
         pc.onconnectionstatechange = () => {
-            if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+            if (pc.__closingManually) {
+                return;
+            }
+            if (["failed", "disconnected"].includes(pc.connectionState)) {
+                closePeer(participant.sid);
+                schedulePeerReconnect(participants.get(participant.sid));
+            } else if (pc.connectionState === "closed") {
                 closePeer(participant.sid);
             }
         };
@@ -487,7 +829,10 @@ document.addEventListener("DOMContentLoaded", () => {
                     description: pc.localDescription,
                 });
             })
-            .catch(() => closePeer(participant.sid));
+            .catch(() => {
+                closePeer(participant.sid);
+                schedulePeerReconnect(participants.get(participant.sid));
+            });
     }
 
     function syncParticipant(participant) {
@@ -495,11 +840,13 @@ document.addEventListener("DOMContentLoaded", () => {
         participants.set(participant.sid, participant);
         if (participant.role !== "user") return;
 
+        ensureTile(participant);
         if (participant.camera_on) {
             createPeerForStudent(participant);
         } else {
             closePeer(participant.sid);
         }
+        updateCount();
     }
 
     socket.on("connect", () => {
@@ -508,7 +855,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     socket.on("room_snapshot", (payload) => {
-        (payload.participants || []).forEach(syncParticipant);
+        syncSnapshot((payload || {}).participants || []);
     });
 
     socket.on("participant_joined", (participant) => {
@@ -519,16 +866,12 @@ document.addEventListener("DOMContentLoaded", () => {
         syncParticipant(participant);
     });
 
-    socket.on("detection_update", (payload) => {
-        if (!payload || payload.quizId !== quizId) return;
-        updateLiveDetectionRow(payload);
-    });
-
     socket.on("participant_left", (payload) => {
         const sid = (payload || {}).sid;
         if (!sid) return;
         participants.delete(sid);
-        closePeer(sid);
+        closePeer(sid, { removeTile: true });
+        updateCount();
     });
 
     socket.on("monitor_status_report", (payload) => {
@@ -544,6 +887,7 @@ document.addEventListener("DOMContentLoaded", () => {
             await pc.setRemoteDescription(new RTCSessionDescription(payload.description));
         } catch (_) {
             closePeer(sid);
+            schedulePeerReconnect(participants.get(sid));
         }
     });
 
@@ -564,12 +908,313 @@ document.addEventListener("DOMContentLoaded", () => {
         showError(message);
     });
 
+    socket.on("disconnect", () => {
+        showError("Live monitoring connection lost. Reconnecting...");
+        const activeParticipantIds = Array.from(participants.keys());
+        participants.clear();
+        activeParticipantIds.forEach((sid) => closePeer(sid));
+        updateCount();
+    });
+
     updateCount();
 
+    if (window.ResizeObserver) {
+        const resizeObserver = new ResizeObserver(() => updateGridLayout());
+        resizeObserver.observe(feedGrid);
+    } else {
+        window.addEventListener("resize", updateGridLayout);
+    }
+
     window.addEventListener("beforeunload", () => {
+        Array.from(peerRetryTimers.keys()).forEach((sid) => clearPeerRetry(sid));
         peers.forEach((_, sid) => closePeer(sid));
         socket.disconnect();
     });
+});
+</script>
+{% endif %}
+
+{% if realtime_enabled and not live_mode %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const selectedQuizId = "{{ selected_quiz }}";
+    const selectedStudentEmail = "{{ selected_student_email }}".toLowerCase();
+    const selectedSeverity = "{{ selected_severity }}";
+    const selectedReviewed = "{{ selected_reviewed }}";
+    const searchTerm = "{{ search }}".toLowerCase();
+    const realtimeQuizIds = JSON.parse('{{ realtime_quiz_ids|tojson }}') || [];
+    if (!window.io || !realtimeQuizIds.length) {
+        return;
+    }
+
+    const socket = io();
+    let activityRefreshTimeout = null;
+    let studentRefreshTimeout = null;
+    
+    const studentGrid = document.getElementById("student-activity-grid");
+    const emptyState = document.getElementById("empty-state");
+    const studentPanel = document.querySelector(".activity-student-panel");
+    
+    function showUpdatingIndicator() {
+        if (!studentPanel) return;
+        
+        let indicator = studentPanel.querySelector(".updating-indicator");
+        if (!indicator) {
+            indicator = document.createElement("div");
+            indicator.className = "updating-indicator";
+            indicator.innerHTML = '<span class="updating-pulse"></span><span>Updating...</span>';
+            studentPanel.querySelector(".activity-student-panel-head").appendChild(indicator);
+        }
+        indicator.classList.remove("hidden");
+    }
+    
+    function hideUpdatingIndicator() {
+        const indicator = studentPanel?.querySelector(".updating-indicator");
+        if (indicator) {
+            indicator.classList.add("hidden");
+        }
+    }
+    
+    function renderStudentCard(student) {
+        const { student_key, student_name, student_email, event_count, quiz_count, highest_level, pending_count, reviewed_count, event_tallies, latest_event, latest_quiz, last_activity, status } = student;
+        const normalizedQuizCount = Number(quiz_count || 0);
+
+        const card = document.createElement('a');
+        card.className = 'activity-student-card new-entry';
+        card.setAttribute('data-student-key', student_key);
+        card.href = `${location.pathname}?quizId=${encodeURIComponent(selectedQuizId)}&studentEmail=${encodeURIComponent(student_key)}&severity=${encodeURIComponent(selectedSeverity)}&reviewed=${encodeURIComponent(selectedReviewed)}&student=${encodeURIComponent(searchTerm)}`;
+        
+        card.innerHTML = `
+            <div class="activity-student-top">
+                <div>
+                    <strong>${student_name}</strong>
+                    <div class="table-subtext">${student_email || 'No email available'}</div>
+                </div>
+                <span class="pill severity-${highest_level}">${highest_level || 'low'}</span>
+            </div>
+            <div class="activity-student-metrics">
+                <span class="metric events" data-count="${event_count}">${event_count} events</span>
+                <span class="metric quizzes" data-count="${normalizedQuizCount}">${normalizedQuizCount} ${normalizedQuizCount === 1 ? 'quiz' : 'quizzes'}</span>
+                <span class="metric pending" data-count="${pending_count}">${pending_count} pending</span>
+                <span class="metric reviewed" data-count="${reviewed_count}">${reviewed_count} reviewed</span>
+            </div>
+            <p class="activity-student-latest"><span class="latest-event">${latest_event || 'In Progress'}</span>${latest_quiz ? ` in <span class="latest-quiz">${latest_quiz}</span>` : ''}</p>
+            ${event_tallies && event_tallies.length > 0 ? `
+            <div class="activity-student-tallies">
+                ${event_tallies.map(([label, count]) => `<span class="pill">${label} x${count}</span>`).join('')}
+            </div>
+            ` : ''}
+            <div class="activity-student-footer">
+                <span class="last-activity">${last_activity || (status === 'in_progress' ? 'Currently Active' : '')}</span>
+                <span class="review-link">View all</span>
+            </div>
+        `;
+        
+        return card;
+    }
+    
+    function fetchAndRenderInProgressStudents() {
+        if (!selectedQuizId) {
+            hideUpdatingIndicator();
+            const loadingInd = document.getElementById('loading-indicator');
+            const noStudents = document.getElementById('no-students');
+            if (loadingInd) loadingInd.style.display = 'none';
+            if (noStudents) noStudents.style.display = 'inline';
+            return;
+        }
+        
+        const params = new URLSearchParams({
+            severity: selectedSeverity,
+            reviewed: selectedReviewed,
+            student: searchTerm,
+            studentEmail: selectedStudentEmail,
+        });
+        const realtimeQuizKey = selectedQuizId === "all" ? "all" : selectedQuizId;
+        const apiUrl = `/api/quiz/${encodeURIComponent(realtimeQuizKey)}/in-progress-students?${params.toString()}`;
+        
+        // Show loading indicator
+        const loadingInd = document.getElementById('loading-indicator');
+        if (loadingInd) loadingInd.style.display = 'inline';
+        
+        fetch(apiUrl)
+            .then(r => {
+                if (!r.ok) {
+                    throw new Error(`HTTP ${r.status}`);
+                }
+                return r.json();
+            })
+            .then(data => {
+                const students = data.students || [];
+                let visibleCount = 0;
+                if (studentGrid) {
+                    studentGrid.innerHTML = '';
+                }
+
+                students.forEach((student) => {
+                    const card = renderStudentCard(student);
+                    if (card && studentGrid) {
+                        studentGrid.appendChild(card);
+                        visibleCount += 1;
+                    }
+                });
+
+                const badge = document.getElementById('student-count-badge');
+                if (badge) {
+                    badge.textContent = `${visibleCount} student${visibleCount !== 1 ? 's' : ''}`;
+                }
+
+                if (studentGrid && emptyState) {
+                    if (visibleCount === 0) {
+                        studentGrid.style.display = 'none';
+                        emptyState.style.display = 'block';
+                        const noStud = document.getElementById('no-students');
+                        if (noStud) noStud.style.display = 'inline';
+                        const loading = document.getElementById('loading-indicator');
+                        if (loading) loading.style.display = 'none';
+                    } else {
+                        studentGrid.style.display = 'grid';
+                        emptyState.style.display = 'none';
+                    }
+                }
+
+                hideUpdatingIndicator();
+            })
+            .catch(err => {
+                console.error('Failed to fetch in-progress students:', err);
+                // Show error state
+                if (emptyState) {
+                    emptyState.style.display = 'block';
+                    const msg = document.getElementById('empty-state-message');
+                    const noStud = document.getElementById('no-students');
+                    const loading = document.getElementById('loading-indicator');
+                    if (loading) loading.style.display = 'none';
+                    if (noStud) noStud.style.display = 'inline';
+                    if (msg) msg.innerHTML = 'No students are currently taking this quiz right now.';
+                }
+                if (studentGrid) studentGrid.style.display = 'none';
+                hideUpdatingIndicator();
+            });
+    }
+    
+    function scheduleStudentRefresh() {
+        if (studentRefreshTimeout) clearTimeout(studentRefreshTimeout);
+        // Poll as a fallback in case a websocket event is missed.
+        studentRefreshTimeout = setTimeout(() => {
+            showUpdatingIndicator();
+            fetchAndRenderInProgressStudents();
+            scheduleStudentRefresh();
+        }, 5000);
+    }
+
+    function scheduleImmediateRefresh() {
+        if (activityRefreshTimeout) clearTimeout(activityRefreshTimeout);
+        activityRefreshTimeout = setTimeout(() => {
+            showUpdatingIndicator();
+            fetchAndRenderInProgressStudents();
+        }, 250);
+    }
+    
+    socket.on("connect", () => {
+        hideUpdatingIndicator();
+        realtimeQuizIds.forEach((quizId) => {
+            socket.emit("join_monitor_room", { quizId, role: "admin", cameraOn: false });
+        });
+    });
+
+    socket.on("room_snapshot", (payload) => {
+        const quizId = (payload || {}).quizId;
+        if (selectedQuizId !== "all" && quizId !== selectedQuizId) {
+            return;
+        }
+        scheduleImmediateRefresh();
+    });
+
+    socket.on("participant_joined", (participant) => {
+        const quizId = (participant || {}).quiz_id;
+        if (selectedQuizId !== "all" && quizId !== selectedQuizId) {
+            return;
+        }
+        scheduleImmediateRefresh();
+    });
+
+    socket.on("participant_updated", (participant) => {
+        const quizId = (participant || {}).quiz_id;
+        if (selectedQuizId !== "all" && quizId !== selectedQuizId) {
+            return;
+        }
+        scheduleImmediateRefresh();
+    });
+
+    socket.on("participant_left", (payload) => {
+        const quizId = (payload || {}).quizId;
+        if (selectedQuizId !== "all" && quizId !== selectedQuizId) {
+            return;
+        }
+        scheduleImmediateRefresh();
+    });
+    
+    socket.on("activity_log_created", (payload) => {
+        if (!payload || !payload.quizId || !payload.log) return;
+        if (selectedQuizId && selectedQuizId !== "all" && payload.quizId !== selectedQuizId) {
+            return;
+        }
+
+        const totalEl = document.getElementById('stat-total-flags');
+        const pendingEl = document.getElementById('stat-pending-review');
+        const reviewedEl = document.getElementById('stat-reviewed');
+        const reviewed = Boolean((payload.log || {}).reviewed);
+        if (totalEl) totalEl.textContent = String((parseInt(totalEl.textContent || '0', 10) || 0) + 1);
+        if (reviewed) {
+            if (reviewedEl) reviewedEl.textContent = String((parseInt(reviewedEl.textContent || '0', 10) || 0) + 1);
+        } else if (pendingEl) {
+            pendingEl.textContent = String((parseInt(pendingEl.textContent || '0', 10) || 0) + 1);
+        }
+
+        scheduleImmediateRefresh();
+    });
+
+    socket.on("monitor_status_report", (payload) => {
+        const quizId = (payload || {}).quizId;
+        if (selectedQuizId !== "all" && quizId !== selectedQuizId) {
+            return;
+        }
+        scheduleImmediateRefresh();
+    });
+    
+    socket.on("disconnect", () => {
+        if (studentRefreshTimeout) clearTimeout(studentRefreshTimeout);
+    });
+    
+    socket.on("error", () => {
+        hideUpdatingIndicator();
+    });
+    
+    window.addEventListener("beforeunload", () => {
+        if (activityRefreshTimeout) clearTimeout(activityRefreshTimeout);
+        if (studentRefreshTimeout) clearTimeout(studentRefreshTimeout);
+        socket.disconnect();
+    });
+    
+    // Make button text visually clear
+    const applyBtn = document.getElementById("apply-filters-btn");
+    if (applyBtn) {
+        applyBtn.addEventListener("click", () => {
+            applyBtn.textContent = "Applying...";
+            applyBtn.disabled = true;
+            setTimeout(() => {
+                applyBtn.disabled = false;
+                applyBtn.textContent = "Apply Filters";
+            }, 1000);
+        });
+    }
+    
+    // Initial load: fetch and render in-progress students
+    if (selectedQuizId) {
+        showUpdatingIndicator();
+        fetchAndRenderInProgressStudents();
+        scheduleStudentRefresh();
+    }
 });
 </script>
 {% endif %}

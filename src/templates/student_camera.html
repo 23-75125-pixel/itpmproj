@@ -134,7 +134,10 @@ async function sendFrameForDetection() {
         const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.7);
         const response = await fetch('{{ url_for("detect_face") }}', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': window.semcdsCsrfToken || '',
+            },
             body: JSON.stringify({ image: dataUrl }),
         });
 
@@ -148,7 +151,7 @@ async function sendFrameForDetection() {
         drawDetections(result.detections || []);
         if (result.detections && result.detections.length > 0) {
             const normalCount = result.detections.filter(d => d.type === 'normal').length;
-            const cheatingCount = result.detections.filter(d => d.type === 'cheating').length;
+            const cheatingCount = result.detections.filter(d => d.type === 'cheat').length;
             const summary = `${normalCount} normal${cheatingCount > 0 ? `, ${cheatingCount} suspicious` : ''}`;
             setSummary(summary);
         } else {

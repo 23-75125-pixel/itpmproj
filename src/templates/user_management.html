@@ -6,18 +6,26 @@
         <h1>User Management</h1>
         <p class="subhead">{{ student_count }} students &middot; {{ instructor_count }} instructors</p>
     </div>
-    <button class="button primary invite-top-button" type="button" onclick="openInviteModal()">
-        <span aria-hidden="true" style="display:inline-flex;align-items:center;margin-right:6px;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                <circle cx="8.5" cy="7" r="4"></circle>
-                <line x1="20" y1="8" x2="20" y2="14"></line>
-                <line x1="17" y1="11" x2="23" y2="11"></line>
-            </svg>
-        </span>
-        Invite Students
-    </button>
+    <div class="flex flex-col gap-3 sm:flex-row">
+      <!-- <button class="button secondary" type="button" onclick="openUserModal()">
+            Add User
+        </button> -->
+        <button class="button primary invite-top-button" type="button" onclick="openInviteModal()">
+            Invite Students
+        </button>
+    </div>
 </section>
+
+{% if message %}
+<section class="manager-banner">
+    <div class="schedule-message success-message" data-swal-message data-swal-icon="success" data-swal-title="Success">{{ message }}</div>
+</section>
+{% endif %}
+{% if error %}
+<section class="manager-banner">
+    <div class="schedule-message blocked" data-swal-message data-swal-icon="error" data-swal-title="Action Failed">{{ error }}</div>
+</section>
+{% endif %}
 
 <section class="activity-stats-grid">
     <article class="stat-card">
@@ -63,7 +71,10 @@
 
 <section class="panel activity-table-panel">
     <div class="user-table-head">
-        <h2>All Users</h2>
+        <div>
+            <h2>All Users</h2>
+            <p class="helper">Edit names, emails, roles, and section assignments here. Users with owned quizzes or attempt history cannot be deleted.</p>
+        </div>
     </div>
     <div class="table-scroll">
         <table class="data-table">
@@ -73,41 +84,71 @@
                     <th>Email</th>
                     <th>Role</th>
                     <th>Joined</th>
+                    <th>Records</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 {% for user in users %}
                 <tr>
-                    <td>
+                     <td>
                         <div class="user-name-cell">
                             <span class="user-initial" aria-hidden="true">
+                                {% if user.avatar_url %}
+                                <img src="{{ user.avatar_url }}" alt="" referrerpolicy="no-referrer">
+                                {% else %}
                                 <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <circle cx="12" cy="8" r="4"></circle>
                                     <path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"></path>
                                 </svg>
+                                {% endif %}
                             </span>
-                            <strong>{{ user.full_name }}</strong>
+                            <div>
+                                <strong>{{ user.full_name }}</strong>
+                                {% if user.is_current_user %}
+                                <div class="table-subtext">Current account</div>
+                                {% endif %}
+                                {% if user.role == 'user' and user.section_name %}
+                                <div class="table-subtext">Section / Class: {{ user.section_name }}</div>
+                                {% endif %}
+                            </div>
                         </div>
                     </td>
                     <td>{{ user.email }}</td>
                     <td>
                         <span class="role-badge {% if user.role == 'admin' %}role-instructor{% else %}role-student{% endif %}">
-                            {% if user.role == 'admin' %}
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;">
-                                <path d="M22 10v6M2 10v6"></path>
-                                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-                                <path d="M6 12v5c0 1.8 2.7 3 6 3s6-1.2 6-3v-5"></path>
-                            </svg>
-                            {% else %}
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px;">
-                                <circle cx="12" cy="8" r="4"></circle>
-                                <path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"></path>
-                            </svg>
-                            {% endif %}
                             {{ "Instructor" if user.role == "admin" else "Student" }}
                         </span>
                     </td>
-                    <td>{{ user.created_at or user.joined or "-" }}</td>
+                    <td>{{ user.created_at or "-" }}</td>
+                    <td>
+                        <div class="table-subtext">{{ user.owned_quizzes }} owned quizzes</div>
+                        <div class="table-subtext">{{ user.quiz_attempts }} quiz attempts</div>
+                    </td>
+                    <td>
+                        <div class="flex flex-col gap-2 sm:flex-row">
+                            <button
+                                type="button"
+                                class="button secondary user-edit-button"
+                                data-user-id="{{ user.id }}"
+                                data-full-name="{{ user.full_name }}"
+                                data-email="{{ user.email }}"
+                                data-role="{{ user.role }}"
+                                data-section-name="{{ user.section_name or '' }}"
+                            >
+                                Edit
+                            </button>
+                            {% if user.can_delete %}
+                            <form method="post" action="{{ url_for('delete_user_management_user') }}" data-swal-confirm data-swal-title="Delete this user?" data-swal-text="This user account will be permanently removed." data-swal-icon="warning" data-swal-confirm-text="Yes, delete user" data-swal-cancel-text="Cancel">
+                                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                                <input type="hidden" name="user_id" value="{{ user.id }}">
+                                <button type="submit" class="button secondary">Delete</button>
+                            </form>
+                            {% else %}
+                            <button type="button" class="button secondary" disabled>Protected</button>
+                            {% endif %}
+                        </div>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -115,23 +156,66 @@
     </div>
 </section>
 
+<div id="user-modal" class="modal-backdrop" hidden>
+    <div class="invite-modal" style="width:min(520px,100%);">
+        <div class="invite-modal-head">
+            <div>
+                <h2 id="user-modal-title">Add User</h2>
+            </div>
+            <button class="modal-close" type="button" onclick="closeUserModal()">&times;</button>
+        </div>
+
+        <form id="user-management-form" method="post" action="{{ url_for('save_user_management_user') }}" data-swal-confirm>
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" id="user-form-id" name="user_id" value="">
+            <div class="invite-modal-body">
+                <label>Full Name
+                    <input id="user-form-name" name="full_name" type="text" required>
+                </label>
+                <label>Email Address
+                    <input id="user-form-email" name="email" type="email" required>
+                </label>
+                <label>Role
+                    <select id="user-form-role" name="role" required>
+                        <option value="user">Student</option>
+                        <option value="admin">Instructor</option>
+                    </select>
+                </label>
+                <label>Section / Class
+                    <input id="user-form-section" name="section_name" type="text" placeholder="e.g., BSIT 2A">
+                    <span class="field-help">Optional for instructors. Use this for students who should receive section-targeted quizzes.</span>
+                </label>
+                <label id="user-password-field">Password
+                    <input id="user-form-password" name="password" type="password" minlength="8">
+                    <span id="user-form-password-help" class="field-help">Set a password with at least 8 characters.</span>
+                </label>
+            </div>
+
+            <div class="invite-modal-actions">
+                <button class="button secondary" type="button" onclick="closeUserModal()">Cancel</button>
+                <button id="user-form-submit" class="button primary" type="submit">Save User</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <div id="invite-modal" class="modal-backdrop" hidden>
     <div class="invite-modal">
         <div class="invite-modal-head">
             <div>
                 <h2>Invite Students</h2>
             </div>
-            <button class="modal-close" type="button" onclick="closeInviteModal()">X</button>
+            <button class="modal-close" type="button" onclick="closeInviteModal()">&times;</button>
         </div>
 
         <div class="invite-modal-body">
             <label>Email Addresses
-                <span class="field-help">Paste multiple emails &mdash; separated by comma, semicolon, or new line.</span>
+                <span class="field-help">Paste multiple emails separated by comma, semicolon, or new line.</span>
                 <textarea id="invite-emails" rows="7" placeholder="student1@example.com&#10;student2@example.com&#10;student3@example.com"></textarea>
             </label>
 
             <div class="note-box">
-                <strong>Note:</strong> Each student will receive an email invitation to create their account and join as a Student role.
+                <strong>Note:</strong> Each invited student gets a student account and a temporary password by email.
             </div>
         </div>
 
@@ -153,13 +237,88 @@ function closeInviteModal() {
     document.body.classList.remove("modal-open");
 }
 
+function openUserModal(payload = null) {
+    const modal = document.getElementById("user-modal");
+    const userForm = document.getElementById("user-management-form");
+    const title = document.getElementById("user-modal-title");
+    const userId = document.getElementById("user-form-id");
+    const name = document.getElementById("user-form-name");
+    const email = document.getElementById("user-form-email");
+    const role = document.getElementById("user-form-role");
+    const section = document.getElementById("user-form-section");
+    const passwordField = document.getElementById("user-password-field");
+    const password = document.getElementById("user-form-password");
+    const help = document.getElementById("user-form-password-help");
+    const submit = document.getElementById("user-form-submit");
+
+    if (!modal || !userForm || !title || !userId || !name || !email || !role || !section || !passwordField || !password || !help || !submit) {
+        return;
+    }
+
+    if (payload) {
+        title.textContent = "Edit User";
+        submit.textContent = "Update User";
+        userForm.dataset.swalTitle = "Update this user?";
+        userForm.dataset.swalText = "The user's account details will be updated.";
+        userForm.dataset.swalIcon = "question";
+        userForm.dataset.swalConfirmText = "Yes, update user";
+        userForm.dataset.swalCancelText = "Cancel";
+        userId.value = payload.userId || "";
+        name.value = payload.fullName || "";
+        email.value = payload.email || "";
+        role.value = payload.role || "user";
+        section.value = payload.sectionName || "";
+        password.value = "";
+        password.required = false;
+        password.disabled = true;
+        passwordField.hidden = true;
+    } else {
+        title.textContent = "Add User";
+        submit.textContent = "Create User";
+        userForm.dataset.swalTitle = "Create this user?";
+        userForm.dataset.swalText = "A new account will be created with the information you entered.";
+        userForm.dataset.swalIcon = "question";
+        userForm.dataset.swalConfirmText = "Yes, create user";
+        userForm.dataset.swalCancelText = "Cancel";
+        userId.value = "";
+        name.value = "";
+        email.value = "";
+        role.value = "user";
+        section.value = "";
+        password.value = "";
+        password.required = true;
+        password.disabled = false;
+        passwordField.hidden = false;
+        help.textContent = "Set a password with at least 8 characters.";
+    }
+
+    modal.hidden = false;
+    document.body.classList.add("modal-open");
+}
+
+function closeUserModal() {
+    document.getElementById("user-modal").hidden = true;
+    document.body.classList.remove("modal-open");
+}
+
 async function sendInvitations() {
     const textarea = document.getElementById("invite-emails");
     const button = document.getElementById("invite-send-button");
     const rawEmails = textarea?.value.trim();
 
     if (!rawEmails) {
-        alert("Please enter one or more email addresses.");
+        await window.semcdsSwal.error("Missing email addresses", "Please enter one or more email addresses.");
+        return;
+    }
+
+    const confirmed = await window.semcdsSwal.confirm({
+        title: "Send student invitations?",
+        text: "New student accounts will be created when needed and invitation emails will be sent to the listed addresses.",
+        icon: "question",
+        confirmButtonText: "Yes, send invitations",
+        cancelButtonText: "Cancel",
+    });
+    if (!confirmed) {
         return;
     }
 
@@ -169,7 +328,10 @@ async function sendInvitations() {
     try {
         const response = await fetch("{{ url_for('send_invitations') }}", {
             method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-CSRF-Token": window.semcdsCsrfToken || "",
+            },
             body: new URLSearchParams({ emails: rawEmails }),
         });
         const data = await response.json();
@@ -180,7 +342,12 @@ async function sendInvitations() {
                 const details = data.errors.map(err => `${err.email}: ${err.message}`).join("\n");
                 errorMessage += `\n\nDetails:\n${details}`;
             }
-            alert(errorMessage);
+            await window.semcdsSwal.fire({
+                title: "Unable to send invitations",
+                html: window.semcdsSwal.toHtmlBlock(errorMessage),
+                icon: "error",
+                confirmButtonText: "OK",
+            });
             return;
         }
 
@@ -189,16 +356,57 @@ async function sendInvitations() {
             const details = data.errors.map(err => `${err.email}: ${err.message}`).join("\n");
             successMessage += `\n\nSome invitations failed:\n${details}`;
         }
-        alert(successMessage);
+        await window.semcdsSwal.fire({
+            title: "Invitations processed",
+            html: window.semcdsSwal.toHtmlBlock(successMessage),
+            icon: data.errors && data.errors.length ? "warning" : "success",
+            confirmButtonText: "OK",
+        });
         textarea.value = "";
         closeInviteModal();
     } catch (error) {
         console.error(error);
-        alert("Unable to send invitations. Please verify your SMTP settings and try again.");
+        await window.semcdsSwal.error("Unable to send invitations", "Please verify your SMTP settings and try again.");
     } finally {
         button.disabled = false;
         button.textContent = "Send Invitations";
     }
 }
+
+document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll(".user-edit-button").forEach((button) => {
+        button.addEventListener("click", () => {
+            openUserModal({
+                userId: button.dataset.userId || "",
+                fullName: button.dataset.fullName || "",
+                email: button.dataset.email || "",
+                role: button.dataset.role || "user",
+                sectionName: button.dataset.sectionName || "",
+            });
+        });
+    });
+
+    document.querySelectorAll(".modal-backdrop").forEach((backdrop) => {
+        backdrop.addEventListener("click", (event) => {
+            if (event.target !== backdrop) {
+                return;
+            }
+            if (backdrop.id === "invite-modal") {
+                closeInviteModal();
+            }
+            if (backdrop.id === "user-modal") {
+                closeUserModal();
+            }
+        });
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") {
+            return;
+        }
+        closeInviteModal();
+        closeUserModal();
+    });
+});
 </script>
 {% endblock %}

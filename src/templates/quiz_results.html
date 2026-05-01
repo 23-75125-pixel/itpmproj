@@ -16,18 +16,34 @@
     <article class="stat-card"><span>Flags Count</span><strong>{{ metrics.flags_count }}</strong></article>
 </section>
 
+<section class="analytics-ranking-grid">
+    {% for attempt in top_rankings %}
+    <article class="stat-card analytics-ranking-card">
+        <span class="analytics-ranking-label">Rank #{{ attempt.rank }}</span>
+        <strong>{{ attempt.student_name }}</strong>
+        <div class="table-subtext">{{ attempt.score }}/{{ attempt.total_points }} &middot; {{ attempt.percentage }}%</div>
+    </article>
+    {% else %}
+    <article class="stat-card analytics-ranking-card">
+        <span class="analytics-ranking-label">Ranking</span>
+        <strong>No completed submissions yet</strong>
+    </article>
+    {% endfor %}
+</section>
+
 <section class="panel">
     <div class="panel-head">
         <div>
             <p class="eyebrow">Per Student Results</p>
-            <h2>Submission Review</h2>
+            <h2>Submission Ranking</h2>
         </div>
-        <button class="button tertiary" type="button">Export to CSV</button>
+        <a class="button tertiary" href="{{ url_for('export_quiz_results_csv', quizId=quiz.id) }}">Export to CSV</a>
     </div>
     <div class="table-scroll">
         <table class="data-table">
             <thead>
                 <tr>
+                    <th>Rank</th>
                     <th>Name</th>
                     <th>Score</th>
                     <th>Percentage</th>
@@ -39,12 +55,17 @@
             <tbody>
                 {% for attempt in attempts %}
                 <tr>
+                    <td>{{ attempt.rank if attempt.rank else '-' }}</td>
                     <td>{{ attempt.student_name }}</td>
                     <td>{{ attempt.score }}/{{ attempt.total_points }}</td>
                     <td>{{ attempt.percentage }}%</td>
-                    <td>{{ attempt.status }}</td>
-                    <td>{{ all_flags | selectattr('attempt_id', 'equalto', attempt.id) | list | length }}</td>
+                    <td><span class="status-badge {{ attempt_status_class(attempt.status) }}">{{ attempt_status_label(attempt.status) }}</span></td>
+                    <td>{{ flags_by_attempt.get(attempt.id, 0) }}</td>
                     <td>{{ attempt.submitted_at or 'Still active' }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="7">No student submissions are available for this quiz yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>

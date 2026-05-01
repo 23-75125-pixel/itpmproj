@@ -2,6 +2,7 @@
 {% block title %}SEMCDS | Create Quiz{% endblock %}
 {% block content %}
 <form id="quiz-editor-form" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="quiz_id" value="{{ sample_quiz.id }}">
     <input type="hidden" id="questions-payload" name="questions_payload" value="">
 
@@ -24,10 +25,21 @@
             <label>Subject / Topic
                 <input type="text" name="subject" value="{{ sample_quiz.subject }}" placeholder="e.g., Mathematics">
             </label>
+            <label>Assign to Section / Class
+                <select name="assigned_section" required>
+                    <option value="" disabled {% if not sample_quiz.assigned_section %}selected{% endif %}>Choose a section or class</option>
+                    {% for section in available_sections %}
+                    <option value="{{ section }}" {% if sample_quiz.assigned_section == section %}selected{% endif %}>{{ section }}</option>
+                    {% endfor %}
+                </select>
+                <small class="helper">
+                    Only students enrolled in the selected section or class can access this quiz.
+                </small>
+            </label>
             <label>Time Limit (auto)
                 <input type="hidden" id="time-limit-minutes" name="time_limit_minutes" value="{{ sample_quiz.time_limit_minutes }}">
                 <input type="text" id="time-limit-display" value="{{ sample_quiz.time_limit_minutes }} minutes" readonly>
-                <small class="helper">Automatically calculated from the scheduled start and end.</small>
+                <small class="helper">Starts at 0 minutes and updates automatically after both schedule fields are set.</small>
             </label>
             <label>Scheduled Start
                 <input type="datetime-local" id="scheduled-start-input" name="scheduled_start" value="{{ format_schedule_input(sample_quiz.scheduled_start) }}">
@@ -146,8 +158,8 @@
     </section>
 
     <section class="publish-row">
-        <button class="button secondary publish-secondary" type="submit" name="action" value="draft">{% if is_edit_mode %}Update Draft{% else %}Save as Draft{% endif %}</button>
-        <button class="button primary publish-primary" type="submit" name="action" value="publish">{% if is_edit_mode %}Update Quiz{% else %}Publish Quiz{% endif %}</button>
+        <button class="button secondary publish-secondary" type="submit" name="action" value="draft" data-swal-confirm data-swal-title="{% if is_edit_mode %}Update this draft?{% else %}Save this quiz as a draft?{% endif %}" data-swal-text="Your quiz will be saved as a draft and can still be edited later." data-swal-icon="question" data-swal-confirm-text="{% if is_edit_mode %}Yes, update draft{% else %}Yes, save draft{% endif %}" data-swal-cancel-text="Cancel">{% if is_edit_mode %}Update Draft{% else %}Save as Draft{% endif %}</button>
+        <button class="button primary publish-primary" type="submit" name="action" value="publish" data-swal-confirm data-swal-title="{% if is_edit_mode %}Update and publish this quiz?{% else %}Publish this quiz?{% endif %}" data-swal-text="Students will be able to access this quiz during its active schedule." data-swal-icon="question" data-swal-confirm-text="{% if is_edit_mode %}Yes, update quiz{% else %}Yes, publish quiz{% endif %}" data-swal-cancel-text="Cancel">{% if is_edit_mode %}Update Quiz{% else %}Publish Quiz{% endif %}</button>
     </section>
 </form>
 
@@ -418,7 +430,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!timeLimitInput || !timeLimitDisplay) return;
         const start = scheduledStartInput ? parseDateTimeLocal(scheduledStartInput.value) : null;
         const end = scheduledEndInput ? parseDateTimeLocal(scheduledEndInput.value) : null;
-        let minutes = Number(timeLimitInput.value || 15);
+        let minutes = 0;
 
         if (start && end && end > start) {
             minutes = Math.max(1, Math.floor((end - start) / 60000));
@@ -620,8 +632,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function attachRemoval(card) {
         const removeButton = card.querySelector(".question-remove-button");
-        removeButton.addEventListener("click", () => {
+        removeButton.addEventListener("click", async () => {
             const cards = questionList.querySelectorAll("[data-question]");
+            const isLastCard = cards.length === 1;
+            const hasContent = !cardIsBlank(card);
+            if (hasContent) {
+                const confirmed = await window.semcdsSwal.confirm({
+                    title: isLastCard ? "Clear this question?" : "Remove this question?",
+                    text: isLastCard
+                        ? "This will clear the current question and its options."
+                        : "This question and its options will be removed from the quiz.",
+                    icon: "warning",
+                    confirmButtonText: isLastCard ? "Yes, clear it" : "Yes, remove it",
+                    cancelButtonText: "Cancel",
+                });
+                if (!confirmed) {
+                    return;
+                }
+            }
+
             if (cards.length === 1) {
                 card.querySelector(".question-text-input").value = "";
                 card.querySelector(".question-points-input").value = "1";
@@ -726,6 +755,7 @@ document.addEventListener("DOMContentLoaded", () => {
             try {
                 const response = await fetch("{{ url_for('create_quiz_ai_preview') }}", {
                     method: "POST",
+                    headers: { "X-CSRF-Token": window.semcdsCsrfToken || "" },
                     body: formData,
                 });
                 const payload = await response.json();

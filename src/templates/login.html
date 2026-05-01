@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}SEMCDS | Login{% endblock %}
 {% block public_content %}
-<div class="min-h-screen bg-[#222a2f] flex items-center justify-center p-4 sm:p-6 lg:p-8">
-    <div class="w-full max-w-6xl rounded-[1.4rem] overflow-hidden bg-white shadow-[0_24px_72px_rgba(0,0,0,0.4)] grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] lg:min-h-[640px]">
+<div class="min-h-screen bg-slate-200 flex items-center justify-center p-4 sm:p-6 lg:p-8">
+    <div class="w-full max-w-6xl rounded-[1.4rem] overflow-hidden bg-white shadow-[0_24px_72px_rgba(15,23,42,0.18)] grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] lg:min-h-[640px]">
         <aside
             class="relative flex min-h-[220px] sm:min-h-[280px] lg:min-h-full items-center justify-center overflow-hidden text-white"
         >
@@ -16,43 +16,27 @@
                 <div class="mx-auto mb-6 sm:mb-8 h-28 w-28 sm:h-40 sm:w-40 rounded-3xl bg-white/92 border border-white/70 shadow-xl flex items-center justify-center">
                     <svg class="h-20 w-20 sm:h-32 sm:w-32" viewBox="0 0 100 140" fill="none" xmlns="http://www.w3.org/2000/svg">
                         <rect width="100" height="140" rx="18" fill="white"/>
-                        <!-- Helmet -->
                         <path d="M35 25 L40 10 L60 10 L65 25 Q70 30 70 40 L30 40 Q30 30 35 25" fill="#DC143C" stroke="#8a1538" stroke-width="1.5"/>
-                        <!-- Helmet detail lines -->
                         <path d="M42 18 L42 35" stroke="#8a1538" stroke-width="0.8"/>
                         <path d="M50 15 L50 38" stroke="#8a1538" stroke-width="0.8"/>
                         <path d="M58 18 L58 35" stroke="#8a1538" stroke-width="0.8"/>
-                        <!-- Face area -->
                         <ellipse cx="50" cy="50" rx="18" ry="22" fill="#DC143C" stroke="#8a1538" stroke-width="1.5"/>
-                        <!-- Eyes -->
                         <circle cx="42" cy="45" r="2.5" fill="#8a1538"/>
                         <circle cx="58" cy="45" r="2.5" fill="#8a1538"/>
-                        <!-- Nose -->
                         <path d="M50 45 L50 57" stroke="#8a1538" stroke-width="1.5" stroke-linecap="round"/>
-                        <!-- Mouth -->
                         <path d="M42 60 Q50 65 58 60" stroke="#8a1538" stroke-width="1.5" stroke-linecap="round" fill="none"/>
-                        
-                        <!-- Sword -->
                         <g transform="translate(20, 35)">
-                            <!-- Blade -->
                             <path d="M0 5 L2 -25 L4 5 Z" fill="#DC143C" stroke="#8a1538" stroke-width="1"/>
-                            <!-- Guard -->
                             <rect x="-3" y="4" width="10" height="3" fill="#DAA520" stroke="#8a1538" stroke-width="0.8"/>
-                            <!-- Handle -->
                             <rect x="0.5" y="7" width="3" height="15" fill="#654321" stroke="#8a1538" stroke-width="0.8" rx="1"/>
                         </g>
-                        
-                        <!-- Shield -->
                         <path d="M25 65 L25 95 Q25 110 50 115 Q75 110 75 95 L75 65 Z" fill="white" stroke="#DC143C" stroke-width="2"/>
                         <path d="M28 68 L28 93 Q28 105 50 110 Q72 105 72 93 L72 68 Z" fill="#F0F0F0" stroke="#DC143C" stroke-width="1"/>
-                        
-                        <!-- Shield text - simplified -->
                         <text x="50" y="85" font-size="8" font-weight="bold" fill="#DC143C" text-anchor="middle" font-family="Arial">RED</text>
                         <text x="50" y="100" font-size="6" font-weight="bold" fill="#DC143C" text-anchor="middle" font-family="Arial">SPARTANS</text>
                     </svg>
                 </div>
                 <h1 class="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-wider text-white leading-tight [text-shadow:0_4px_18px_rgba(0,0,0,0.45)]">Smart Exam Management and Cheating Detection System</h1>
-
             </div>
         </aside>
 
@@ -73,17 +57,18 @@
                 </div>
 
                 {% if error %}
-                <div class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                <div class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3" data-swal-message data-swal-icon="error" data-swal-title="Login Failed">
                     <p class="text-sm font-medium text-red-700">{{ error }}</p>
                 </div>
                 {% endif %}
                 {% if forgot_message %}
-                <div class="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                <div class="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3" data-swal-message data-swal-icon="success" data-swal-title="Success">
                     <p class="text-sm font-medium text-amber-800">{{ forgot_message }}</p>
                 </div>
                 {% endif %}
 
-                <form method="post" action="{{ url_for("login") }}" class="space-y-6">
+                <form method="post" action="{{ url_for('login') }}" class="space-y-6">
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="role" value="{{ selected_role }}">
 
                     <div>
@@ -96,13 +81,39 @@
                     <div>
                         <label class="sr-only" for="login-password">Password</label>
                         <div class="relative border-b border-gray-300 focus-within:border-rose-700 transition">
-                            <input id="login-password" type="password" name="password" placeholder="Password" autocomplete="current-password" required class="w-full bg-transparent px-2 py-3 pr-10 text-base sm:text-lg text-gray-700 placeholder:text-gray-400 outline-none">
-                            <button id="toggle-password" type="button" class="absolute right-0 top-1/2 -translate-y-1/2 text-gray-500 transition hover:text-rose-700" aria-label="Show password">👁</button>
+                            <input id="login-password" type="password" name="password" placeholder="Password" autocomplete="current-password" required class="w-full bg-transparent px-2 py-3 pr-12 text-base sm:text-lg text-gray-700 placeholder:text-gray-400 outline-none">
+                            <button
+                                id="toggle-password"
+                                type="button"
+                                class="absolute right-0.5 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-gray-500 transition hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 focus-visible:ring-offset-2"
+                                aria-label="Show password"
+                                aria-controls="login-password"
+                                aria-pressed="false"
+                                title="Show password"
+                            >
+                                <svg data-password-icon-hide class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"></path>
+                                    <circle cx="12" cy="12" r="3"></circle>
+                                </svg>
+                                <svg data-password-icon-show class="hidden h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M3 3l18 18"></path>
+                                    <path d="M10.6 10.7a3 3 0 0 0 4.2 4.2"></path>
+                                    <path d="M9.9 4.2A10.7 10.7 0 0 1 12 4c6 0 9.5 8 9.5 8a15.5 15.5 0 0 1-3.2 4.2"></path>
+                                    <path d="M6.2 6.3A15.7 15.7 0 0 0 2.5 12s3.5 8 9.5 8a10.6 10.6 0 0 0 5-.9"></path>
+                                </svg>
+                            </button>
                         </div>
                     </div>
 
                     <div class="flex flex-col-reverse sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 text-sm">
-                        <a href="{{ url_for('forgot_password') }}" class="font-semibold text-rose-600 hover:text-rose-700 transition">Forgot Password?</a>
+                        <a href="{{ url_for('forgot_password') }}" class="inline-flex items-center gap-2 font-semibold text-rose-600 hover:text-rose-700 transition">
+                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="9"></circle>
+                                <path d="M9.1 9a3 3 0 1 1 5.8 1c-.35 1.06-1.23 1.46-1.96 1.96-.66.45-.94.82-.94 1.54"></path>
+                                <circle cx="12" cy="17" r="1"></circle>
+                            </svg>
+                            <span>Forgot Password?</span>
+                        </a>
                         <label class="inline-flex items-center gap-2 text-gray-800 font-medium">
                             <input type="checkbox" name="remember_me" class="h-4 w-4 rounded border-gray-400 bg-white accent-rose-700">
                             <span>Remember me</span>
@@ -138,14 +149,27 @@
 document.addEventListener("DOMContentLoaded", () => {
     const passwordInput = document.getElementById("login-password");
     const toggleButton = document.getElementById("toggle-password");
+    const showIcon = toggleButton?.querySelector("[data-password-icon-show]");
+    const hideIcon = toggleButton?.querySelector("[data-password-icon-hide]");
 
     if (!passwordInput || !toggleButton) return;
 
+    const syncPasswordToggle = () => {
+        const isVisible = passwordInput.type === "text";
+        const buttonLabel = isVisible ? "Hide password" : "Show password";
+        toggleButton.setAttribute("aria-label", buttonLabel);
+        toggleButton.setAttribute("aria-pressed", isVisible ? "true" : "false");
+        toggleButton.setAttribute("title", buttonLabel);
+        showIcon?.classList.toggle("hidden", isVisible);
+        hideIcon?.classList.toggle("hidden", !isVisible);
+    };
+
     toggleButton.addEventListener("click", () => {
-        const showing = passwordInput.type === "text";
-        passwordInput.type = showing ? "password" : "text";
-        toggleButton.textContent = showing ? "👁" : "🙈";
+        passwordInput.type = passwordInput.type === "password" ? "text" : "password";
+        syncPasswordToggle();
     });
+
+    syncPasswordToggle();
 });
 </script>
 {% endblock %}

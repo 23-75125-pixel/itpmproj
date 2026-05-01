@@ -3,14 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import base64
+import csv
+import hashlib
 import json
 import os
 import re
 import secrets
+import sqlite3
 import ssl
 import smtplib
 from email.message import EmailMessage
-from io import BytesIO
+from io import BytesIO, StringIO
 from collections import Counter
 from datetime import datetime, timedelta
 from functools import wraps
@@ -22,6 +25,8 @@ import numpy as np
 from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pypdf import PdfReader
+
+from .env_loader import load_env_file
 
 try:
     import cv2
@@ -41,9 +46,11 @@ except Exception:  # pragma: no cover - optional realtime dependency
     join_room = None
     leave_room = None
 
+load_env_file()
+
 from .data import (
     activity_log_with_details,
-    activity_stats,
+    attempt_has_expired,
     build_dashboard_calendar,
     cheating_summary,
     create_activity_log,
@@ -51,15 +58,16 @@ from .data import (
     create_user,
     dashboard_stats,
     delete_quiz_by_id,
+    delete_user_by_id,
     delete_user_by_email,
     ensure_quiz_attempt_in_progress,
     finalize_quiz_attempt,
     format_schedule,
     get_attempt,
     get_quiz,
+    get_quiz_attempt_for_student,
     get_quiz_by_code,
     get_quizzes,
-    get_user,
     get_user_by_email,
     get_user_by_id,
     get_users,
@@ -69,13 +77,18 @@ from .data import (
     quiz_access_state,
     quiz_flags,
     parse_schedule,
+    remaining_attempt_seconds,
+    reset_dashboard_data,
     schedule_status,
+    scheduled_quizzes_for_day,
     student_dashboard_summary,
-    student_attempts,
-    submit_quiz_attempt,
+    set_user_avatar_url,
     set_user_password,
     verify_password,
     set_quiz_status,
+    sync_quiz_statuses,
+    update_user,
+    user_record_counts,
 )
 
 
@@ -94,12 +107,135 @@ DETECTION_CLASS_CHEAT_MIN_CONF = 0.55
 DETECTION_CLASS_MARGIN = 0.06
 DETECTION_CLASS_DRAW_MIN_CONF = 0.15
 DETECTION_CLASS_CHEAT_STRICT_MIN_CONF = 0.70
+QUIZ_SECTION_OPTIONS = ["BSIT-NT 3201", "BSIT-NT 3202"]
+SOCKETIO_ASYNC_MODE = os.getenv("SOCKETIO_ASYNC_MODE", "threading").strip().lower()
+if SOCKETIO_ASYNC_MODE in {"", "auto"}:
+    SOCKETIO_ASYNC_MODE = None
 
-socketio = SocketIO(cors_allowed_origins="*", async_mode="threading") if SocketIO else None
+socketio = SocketIO(async_mode=SOCKETIO_ASYNC_MODE) if SocketIO else None
 _monitor_rooms: dict[str, dict[str, dict]] = {}
 _detection_event_cache: dict[str, datetime] = {}
-_password_reset_code_store: dict[str, dict] = {}
-_shared_session: dict[str, str] = {}  # Stores shared session: {"user_id": "", "role": ""}
+
+ACTIVITY_EVENT_LABELS = {
+    "cheat": "Cheat Detected",
+    "alt_tab_attempt": "Alt+Tab Attempt",
+    "face_detected": "Face Detected",
+    "no_face_detected": "No Face Detected",
+    "low_confidence_face_detected": "Low Confidence Face Detected",
+    "camera_permission_denied": "Camera Permission Denied",
+    "camera_api_unavailable": "Camera API Unavailable",
+    "camera_status": "Camera Status Issue",
+    "tab_switch": "Tab Switch Detected",
+    "window_blur": "Quiz Window Lost Focus",
+    "detection_request_failed": "Detection Request Failed",
+    "detection_unavailable": "Detection Unavailable",
+    "realtime_error": "Realtime Error",
+    "webrtc_connection_error": "Camera Stream Connection Error",
+    "webrtc_stream_disconnected": "Camera Stream Disconnected",
+}
+ATTEMPT_STATUS_LABELS = {
+    "submitted": "Submitted",
+    "auto_submitted": "Auto Submitted",
+    "in_progress": "In Progress",
+}
+ATTEMPT_STATUS_CLASSES = {
+    "submitted": "submitted",
+    "auto_submitted": "auto-submitted",
+    "in_progress": "in-progress",
+}
+
+
+def humanize_identifier(value: str | None, fallback: str = "") -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return fallback
+    normalized = raw_value.replace("-", "_").strip("_").lower()
+    if normalized in ACTIVITY_EVENT_LABELS:
+        return ACTIVITY_EVENT_LABELS[normalized]
+    return normalized.replace("_", " ").title()
+
+
+def activity_event_label(event_type: str | None) -> str:
+    return humanize_identifier(event_type, "Activity Event")
+
+
+def activity_result_label(event_type: str | None) -> str:
+    normalized = str(event_type or "").strip().replace("-", "_").lower()
+    if not normalized:
+        return "Waiting for Signal"
+    if normalized == "normal":
+        return "Normal"
+    return activity_event_label(normalized)
+
+
+def attempt_status_label(status: str | None) -> str:
+    normalized = str(status or "").strip().lower()
+    return ATTEMPT_STATUS_LABELS.get(normalized, humanize_identifier(normalized, "Unknown"))
+
+
+def attempt_status_class(status: str | None) -> str:
+    normalized = str(status or "").strip().lower()
+    return ATTEMPT_STATUS_CLASSES.get(normalized, "neutral")
+
+
+def review_status_class(reviewed: bool) -> str:
+    return "reviewed" if reviewed else "pending"
+
+
+def build_activity_stats(logs: list[dict]) -> dict:
+    return {
+        "total_flags": len(logs),
+        "high_severity": sum(1 for row in logs if row.get("flag_level") == "high"),
+        "pending_review": sum(1 for row in logs if not row.get("reviewed")),
+        "reviewed": sum(1 for row in logs if row.get("reviewed")),
+    }
+
+
+def sort_timestamp(value: str | None) -> datetime:
+    return parse_schedule(value) or datetime.min
+
+
+def format_current_timestamp(value: datetime) -> str:
+    return value.strftime("%b %d, %Y %I:%M %p").replace(" 0", " ")
+
+
+def parse_dashboard_day_key(value: str | None) -> datetime | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.strptime(raw_value, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def format_dashboard_day_label(value: datetime | None) -> str:
+    if not value:
+        return ""
+    return value.strftime("%B %d, %Y").replace(" 0", " ")
+
+
+def student_quiz_window_summary(quiz: dict, now: datetime | None = None) -> dict:
+    now = now or datetime.now()
+    start = parse_schedule(quiz.get("scheduled_start"))
+    end = parse_schedule(quiz.get("scheduled_end"))
+    if start and end:
+        summary = f"Open now until {format_schedule(quiz.get('scheduled_end'))}."
+    elif end:
+        summary = f"Open now. Closes at {format_schedule(quiz.get('scheduled_end'))}."
+    elif start:
+        summary = f"Open now. Started at {format_schedule(quiz.get('scheduled_start'))}."
+    else:
+        summary = "Open now. No closing time is scheduled."
+    return {
+        "start": start,
+        "end": end,
+        "opens_at": format_schedule(quiz.get("scheduled_start")) if start else "Immediately when published",
+        "closes_at": format_schedule(quiz.get("scheduled_end")) if end else "No closing time set",
+        "summary": summary,
+        "is_open_now": True,
+        "checked_at": format_current_timestamp(now),
+    }
 
 
 def extract_checkpoint_labels(model_path: Path) -> list[str]:
@@ -198,29 +334,154 @@ def classify_face_detection(
 
 def create_app() -> Flask:
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = "semcds-demo-secret"
+    configured_secret_key = os.environ.get("SECRET_KEY", "").strip() or os.environ.get("FLASK_SECRET_KEY", "").strip()
+    fallback_secret_key = hashlib.sha256(str(Path(__file__).resolve().parent.parent).encode("utf-8")).hexdigest()
+    app.config["SECRET_KEY"] = configured_secret_key or fallback_secret_key
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
     app.config["PREFERRED_URL_SCHEME"] = "https"  # Use https by default for ngrok
-    app.config["SESSION_COOKIE_SECURE"] = os.getenv("FLASK_ENV", "development") == "production"
-    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # Allow cross-site access
+    app.config["SESSION_COOKIE_SECURE"] = os.environ.get(
+        "SESSION_COOKIE_SECURE",
+        "1" if os.getenv("FLASK_ENV", "development") == "production" else "0",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax").strip() or "Lax"
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_NAME"] = "semcds_session"
+    app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH", str(15 * 1024 * 1024)))
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
     init_database()
 
     if socketio:
-        socketio.init_app(app, manage_session=False, cors_allowed_origins="*")
+        socketio.init_app(app, manage_session=False)
 
     def redirect_to(endpoint, **kwargs):
         """Redirect to an endpoint using relative URLs to preserve the current host.
         This ensures redirects work correctly whether accessed via localhost or ngrok URL."""
         return redirect(url_for(endpoint, **kwargs, _external=False))
 
+    def _normalize_avatar_url(raw_value: str | None) -> str:
+        avatar_url = str(raw_value or "").strip()
+        if not avatar_url:
+            return ""
+        parsed = urllib_parse.urlparse(avatar_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        return avatar_url
+
+    def current_session_user() -> dict | None:
+        user_id = str(session.get("user_id", "")).strip()
+        role = str(session.get("role", "")).strip()
+        if not user_id or role not in {"admin", "user"}:
+            return None
+
+        user = get_user_by_id(user_id)
+        if not user or user.get("role") != role:
+            session.clear()
+            return None
+        avatar_url = _normalize_avatar_url(session.get("avatar_url") or user.get("avatar_url"))
+        return {**user, "avatar_url": avatar_url}
+
+    def issue_csrf_token(force: bool = False) -> str:
+        if force or not session.get("_csrf_token"):
+            session["_csrf_token"] = secrets.token_urlsafe(32)
+        return str(session["_csrf_token"])
+
+    app.jinja_env.globals["csrf_token"] = issue_csrf_token
+    app.jinja_env.globals["activity_event_label"] = activity_event_label
+    app.jinja_env.globals["activity_result_label"] = activity_result_label
+    app.jinja_env.globals["attempt_status_label"] = attempt_status_label
+    app.jinja_env.globals["attempt_status_class"] = attempt_status_class
+    app.jinja_env.globals["review_status_class"] = review_status_class
+
+    def build_quiz_results_context(quiz: dict) -> dict:
+        attempts = quiz_attempts(quiz["id"])
+        flags = quiz_flags(quiz["id"])
+        flags_by_attempt = Counter(
+            str(flag.get("attempt_id", "")).strip()
+            for flag in flags
+            if str(flag.get("attempt_id", "")).strip()
+        )
+        completed_attempts = [
+            attempt for attempt in attempts
+            if attempt.get("status") in {"submitted", "auto_submitted"}
+        ]
+        ranked_attempts = sorted(
+            completed_attempts,
+            key=lambda item: (
+                -float(item.get("percentage", 0) or 0),
+                -int(item.get("score", 0) or 0),
+                parse_schedule(item.get("submitted_at")) or datetime.max,
+                item.get("student_name", "").lower(),
+            ),
+        )
+
+        previous_score_key = None
+        current_rank = 0
+        for index, attempt in enumerate(ranked_attempts, start=1):
+            score_key = (
+                float(attempt.get("percentage", 0) or 0),
+                int(attempt.get("score", 0) or 0),
+            )
+            if score_key != previous_score_key:
+                current_rank = index
+                previous_score_key = score_key
+            attempt["rank"] = current_rank
+
+        for attempt in attempts:
+            if attempt.get("status") not in {"submitted", "auto_submitted"}:
+                attempt["rank"] = None
+
+        ordered_attempts = ranked_attempts + [
+            attempt for attempt in attempts
+            if attempt.get("status") not in {"submitted", "auto_submitted"}
+        ]
+        average = round(sum(item["percentage"] for item in ranked_attempts) / len(ranked_attempts), 1) if ranked_attempts else 0
+        highest = max((item["percentage"] for item in ranked_attempts), default=0)
+        return {
+            "attempts": ordered_attempts,
+            "all_flags": flags,
+            "flags_by_attempt": flags_by_attempt,
+            "top_rankings": ranked_attempts[:3],
+            "metrics": {
+                "submissions": len(ranked_attempts),
+                "average_score": average,
+                "highest_score": highest,
+                "flags_count": len(flags),
+            },
+        }
+
+    def quiz_results_csv_filename(quiz: dict) -> str:
+        raw_title = str(quiz.get("title", "")).strip().lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", raw_title).strip("-")
+        return f"{slug or 'quiz'}-results.csv"
+
+    def csrf_error_response(status_code: int = 400):
+        message = "Invalid or missing security token. Refresh the page and try again."
+        if request.endpoint in {"send_invitations", "create_quiz_ai_preview", "detect_face"} or request.is_json or request.headers.get("X-CSRF-Token"):
+            return jsonify({"success": False, "message": message}), status_code
+        return Response(message, status=status_code, mimetype="text/plain")
+
     @app.before_request
-    def auto_login_from_shared_session():
-        """Automatically login if shared session exists and user is not already logged in."""
-        if "user_id" not in session and _shared_session.get("user_id"):
-            session["user_id"] = _shared_session["user_id"]
-            session["role"] = _shared_session["role"]
-            session.permanent = True
+    def enforce_csrf_protection():
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        if request.endpoint == "static":
+            return None
+
+        session_token = str(session.get("_csrf_token", "")).strip()
+        request_token = (
+            request.headers.get("X-CSRF-Token", "")
+            or request.form.get("_csrf_token", "")
+        ).strip()
+        if not session_token or not request_token or not secrets.compare_digest(session_token, request_token):
+            return csrf_error_response()
+        return None
+
+    @app.before_request
+    def synchronize_runtime_state():
+        if request.endpoint == "static":
+            return None
+        sync_quiz_statuses()
+        return None
 
     @app.after_request
     def disable_static_cache(response):
@@ -300,8 +561,8 @@ def create_app() -> Flask:
         host = (hostname or "").strip().lower()
         return host.startswith("localhost") or host.startswith("127.0.0.1")
 
-    def _current_external_callback_uri() -> str:
-        """Build callback URI from forwarded headers so ngrok devices never redirect to localhost."""
+    def _current_external_url(endpoint: str, **values) -> str:
+        """Build external URLs from forwarded headers so ngrok and proxy users get usable links."""
         forwarded_proto = (request.headers.get("X-Forwarded-Proto", "") or "").split(",")[0].strip().lower()
         forwarded_host = (request.headers.get("X-Forwarded-Host", "") or "").split(",")[0].strip()
 
@@ -314,8 +575,11 @@ def create_app() -> Flask:
         elif scheme == "http" and host.endswith(":80"):
             host = host[:-3]
 
-        callback_path = url_for("google_callback", _external=False)
-        return f"{scheme}://{host}{callback_path}"
+        route_path = url_for(endpoint, _external=False, **values)
+        return f"{scheme}://{host}{route_path}"
+
+    def _current_external_callback_uri() -> str:
+        return _current_external_url("google_callback")
 
     def _get_google_oauth_config():
         client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
@@ -336,7 +600,12 @@ def create_app() -> Flask:
 
     def _authorize_google(role: str) -> str:
         client_id, _, redirect_uri = _get_google_oauth_config()
-        state = role if role in {"admin", "user"} else "user"
+        normalized_role = role if role in {"admin", "user"} else "user"
+        oauth_state = secrets.token_urlsafe(24)
+        session["google_oauth_state"] = {
+            "value": oauth_state,
+            "role": normalized_role,
+        }
         query = urllib_parse.urlencode(
             {
                 "client_id": client_id,
@@ -345,7 +614,7 @@ def create_app() -> Flask:
                 "scope": "openid email profile",
                 "prompt": "select_account",
                 "access_type": "offline",
-                "state": state,
+                "state": oauth_state,
             }
         )
         return f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
@@ -384,25 +653,60 @@ def create_app() -> Flask:
         except Exception as exc:
             raise RuntimeError("Unable to retrieve Google profile information.") from exc
 
-    def _send_invitation_email(recipient_email: str, temporary_password: str | None = None) -> None:
+    class EmailDeliveryConnectivityError(RuntimeError):
+        pass
+
+    def _running_on_render() -> bool:
+        return any(
+            str(os.environ.get(name, "")).strip()
+            for name in ("RENDER", "RENDER_SERVICE_ID", "RENDER_EXTERNAL_URL")
+        )
+
+    def _send_smtp_email(recipient_email: str, subject: str, body_lines: list[str], *, error_context: str) -> None:
+        def env_flag(name: str, default: bool) -> bool:
+            raw_value = os.environ.get(name)
+            if raw_value is None or not str(raw_value).strip():
+                return default
+            return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+        def connectivity_error_message(exc: BaseException) -> str | None:
+            error_text = str(exc).strip() or exc.__class__.__name__
+            lowered_text = error_text.lower()
+            error_no = getattr(exc, "errno", None)
+            if error_no in {101, 111, 113} or "network is unreachable" in lowered_text or "connection refused" in lowered_text:
+                if _running_on_render():
+                    return (
+                        "SMTP is unreachable from this Render service. On Render free instances, outbound SMTP ports can be blocked. "
+                        "Use a paid instance or configure Brevo with EMAIL_DELIVERY_PROVIDER=brevo, BREVO_API_KEY, and EMAIL_FROM."
+                    )
+                return f"Unable to reach the SMTP server while {error_context}. Verify SMTP_HOST, SMTP_PORT, and outbound network access."
+            return None
+
         smtp_host = os.environ.get("SMTP_HOST", "").strip()
-        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
         smtp_user = os.environ.get("SMTP_USER", "").strip()
         smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
-        smtp_from = os.environ.get("SMTP_FROM", smtp_user or "noreply@example.com").strip()
-        if not smtp_host or not smtp_user or not smtp_password:
-            raise RuntimeError("Email sending is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASSWORD.")
+        smtp_from = os.environ.get("SMTP_FROM", "").strip() or os.environ.get("EMAIL_FROM", "").strip() or smtp_user or "noreply@example.com"
+        try:
+            smtp_port = int((os.environ.get("SMTP_PORT", "587") or "587").strip())
+        except ValueError as exc:
+            raise RuntimeError("SMTP_PORT must be a valid number.") from exc
+        try:
+            smtp_timeout = float((os.environ.get("SMTP_TIMEOUT", "20") or "20").strip())
+        except ValueError as exc:
+            raise RuntimeError("SMTP_TIMEOUT must be a valid number.") from exc
 
-        login_url = url_for("login", _external=True)
-        body_lines = [
-            f"Hello,\n\nYou've been invited to join SEMCDS as a Student.",
-            "\n",
-        ]
-        if temporary_password:
-            body_lines.append(
-                f"A new account has been created for you.\n\nEmail: {recipient_email}\nTemporary password: {temporary_password}\n"
-            )
-        body_lines.append(f"Sign in here: {login_url}\n\nIf you did not expect this invitation, please ignore this message.")
+        smtp_use_ssl = env_flag("SMTP_USE_SSL", smtp_port == 465)
+        smtp_use_tls = env_flag("SMTP_USE_TLS", smtp_port in {587, 2525})
+        smtp_require_auth = env_flag("SMTP_REQUIRE_AUTH", bool(smtp_user or smtp_password))
+
+        if smtp_use_ssl:
+            smtp_use_tls = False
+
+        if not smtp_host:
+            raise RuntimeError("Email sending is not configured. Set SMTP_HOST first.")
+        if smtp_require_auth and (not smtp_user or not smtp_password):
+            raise RuntimeError("SMTP authentication is enabled, but SMTP_USER or SMTP_PASSWORD is missing.")
+
         message = EmailMessage()
 
         effective_sender = smtp_from
@@ -413,21 +717,33 @@ def create_app() -> Flask:
 
         message["From"] = effective_sender
         message["To"] = recipient_email
-        message["Subject"] = "You're invited to SEMCDS"
+        message["Subject"] = subject
         message.set_content("\n".join(body_lines))
 
         context = ssl.create_default_context()
-        if smtp_port == 465:
-            smtp_client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context)
-        else:
-            smtp_client = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
+        smtp_client = None
         try:
-            if smtp_port != 465:
+            if smtp_use_ssl:
+                smtp_client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=smtp_timeout, context=context)
+            else:
+                smtp_client = smtplib.SMTP(smtp_host, smtp_port, timeout=smtp_timeout)
+            if smtp_use_tls:
                 smtp_client.ehlo()
-                smtp_client.starttls(context=context)
+                try:
+                    smtp_client.starttls(context=context)
+                except smtplib.SMTPNotSupportedError as exc:
+                    raise RuntimeError(
+                        "The SMTP server does not support STARTTLS. Set SMTP_USE_TLS=0 or use SMTP_PORT=465 with SMTP_USE_SSL=1."
+                    ) from exc
                 smtp_client.ehlo()
-            smtp_client.login(smtp_user, smtp_password)
+            if smtp_require_auth:
+                smtp_client.login(smtp_user, smtp_password)
             smtp_client.send_message(message, from_addr=effective_sender)
+        except OSError as exc:
+            user_facing_message = connectivity_error_message(exc)
+            if user_facing_message:
+                raise EmailDeliveryConnectivityError(user_facing_message) from exc
+            raise RuntimeError(f"Unable to connect to the SMTP server while {error_context}: {exc}") from exc
         except smtplib.SMTPAuthenticationError as exc:
             raise RuntimeError(
                 "SMTP authentication failed. If you are using Gmail, set SMTP_USER to the Gmail address "
@@ -439,148 +755,212 @@ def create_app() -> Flask:
                 "or use a sender allowed by your mail provider."
             ) from exc
         except smtplib.SMTPException as exc:
-            raise RuntimeError(f"SMTP error while sending invitation: {exc}") from exc
+            raise RuntimeError(f"SMTP error while {error_context}: {exc}") from exc
         finally:
-            smtp_client.quit()
+            try:
+                if smtp_client:
+                    smtp_client.quit()
+            except Exception:
+                pass
+
+    def _send_resend_email(recipient_email: str, subject: str, body_lines: list[str], *, error_context: str) -> None:
+        resend_api_key = os.environ.get("RESEND_API_KEY", "").strip()
+        email_from = os.environ.get("EMAIL_FROM", "").strip() or os.environ.get("SMTP_FROM", "").strip()
+        resend_user_agent = os.environ.get("EMAIL_USER_AGENT", "").strip() or "SEMCDS/1.0"
+
+        if not resend_api_key:
+            raise RuntimeError("Resend email delivery is not configured. Set RESEND_API_KEY first.")
+        if not email_from:
+            raise RuntimeError("Set EMAIL_FROM for Resend email delivery.")
+
+        payload = {
+            "from": email_from,
+            "to": [recipient_email],
+            "subject": subject,
+            "text": "\n".join(body_lines),
+        }
+        resend_request = urllib_request.Request(
+            "https://api.resend.com/emails",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {resend_api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": resend_user_agent,
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(resend_request, timeout=30) as response:
+                response.read()
+        except urllib_error.HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
+            try:
+                parsed_body = json.loads(raw_body) if raw_body else {}
+            except ValueError:
+                parsed_body = {}
+            detail = parsed_body.get("message") or raw_body or str(exc)
+            raise RuntimeError(f"Resend rejected the email request while {error_context}: {detail}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"Unable to reach the Resend API while {error_context}: {exc.reason}") from exc
+
+    def _send_brevo_email(recipient_email: str, subject: str, body_lines: list[str], *, error_context: str) -> None:
+        brevo_api_key = os.environ.get("BREVO_API_KEY", "").strip()
+        email_from = os.environ.get("EMAIL_FROM", "").strip() or os.environ.get("SMTP_FROM", "").strip()
+        email_from_name = os.environ.get("EMAIL_FROM_NAME", "").strip() or "SEMCDS"
+        email_user_agent = os.environ.get("EMAIL_USER_AGENT", "").strip() or "SEMCDS/1.0"
+
+        if not brevo_api_key:
+            raise RuntimeError("Brevo email delivery is not configured. Set BREVO_API_KEY first.")
+        if not email_from:
+            raise RuntimeError("Set EMAIL_FROM for Brevo email delivery.")
+
+        payload = {
+            "sender": {
+                "email": email_from,
+                "name": email_from_name,
+            },
+            "to": [{"email": recipient_email}],
+            "subject": subject,
+            "textContent": "\n".join(body_lines),
+        }
+        brevo_request = urllib_request.Request(
+            "https://api.brevo.com/v3/smtp/email",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "accept": "application/json",
+                "api-key": brevo_api_key,
+                "content-type": "application/json",
+                "User-Agent": email_user_agent,
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(brevo_request, timeout=30) as response:
+                response.read()
+        except urllib_error.HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
+            try:
+                parsed_body = json.loads(raw_body) if raw_body else {}
+            except ValueError:
+                parsed_body = {}
+            detail_parts = [parsed_body.get("message"), parsed_body.get("code")]
+            detail = " - ".join(part for part in detail_parts if part) or raw_body or str(exc)
+            raise RuntimeError(f"Brevo rejected the email request while {error_context}: {detail}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"Unable to reach the Brevo API while {error_context}: {exc.reason}") from exc
+
+    def _send_email(recipient_email: str, subject: str, body_lines: list[str], *, error_context: str) -> None:
+        provider = os.environ.get("EMAIL_DELIVERY_PROVIDER", "auto").strip().lower() or "auto"
+        brevo_api_key = os.environ.get("BREVO_API_KEY", "").strip()
+        resend_api_key = os.environ.get("RESEND_API_KEY", "").strip()
+        smtp_host = os.environ.get("SMTP_HOST", "").strip()
+
+        if provider == "brevo":
+            _send_brevo_email(recipient_email, subject, body_lines, error_context=error_context)
+            return
+
+        if provider == "resend":
+            _send_resend_email(recipient_email, subject, body_lines, error_context=error_context)
+            return
+
+        if provider == "smtp":
+            _send_smtp_email(recipient_email, subject, body_lines, error_context=error_context)
+            return
+
+        if provider not in {"auto", "smtp", "resend", "brevo"}:
+            raise RuntimeError("EMAIL_DELIVERY_PROVIDER must be auto, smtp, brevo, or resend.")
+
+        if smtp_host:
+            try:
+                _send_smtp_email(recipient_email, subject, body_lines, error_context=error_context)
+                return
+            except EmailDeliveryConnectivityError:
+                if brevo_api_key:
+                    _send_brevo_email(recipient_email, subject, body_lines, error_context=error_context)
+                    return
+                if resend_api_key:
+                    _send_resend_email(recipient_email, subject, body_lines, error_context=error_context)
+                    return
+                raise
+
+        if brevo_api_key:
+            _send_brevo_email(recipient_email, subject, body_lines, error_context=error_context)
+            return
+
+        if resend_api_key:
+            _send_resend_email(recipient_email, subject, body_lines, error_context=error_context)
+            return
+
+        raise RuntimeError(
+            "Email sending is not configured. Set SMTP_HOST for SMTP, or set BREVO_API_KEY with EMAIL_FROM for Brevo, or set RESEND_API_KEY with EMAIL_FROM for Resend."
+        )
+
+    def _send_invitation_email(recipient_email: str, temporary_password: str | None = None) -> None:
+        login_url = _current_external_url("login")
+        body_lines = [
+            "Hello,",
+            "",
+            "You've been invited to join SEMCDS as a Student.",
+            "",
+        ]
+        if temporary_password:
+            body_lines.extend(
+                [
+                    "A new account has been created for you.",
+                    "",
+                    f"Email: {recipient_email}",
+                    f"Temporary password: {temporary_password}",
+                    "",
+                ]
+            )
+        body_lines.extend(
+            [
+                f"Sign in here: {login_url}",
+                "",
+                "If you did not expect this invitation, please ignore this message.",
+            ]
+        )
+        _send_email(
+            recipient_email,
+            "You're invited to SEMCDS",
+            body_lines,
+            error_context="sending invitation email",
+        )
 
     def _send_password_reset_email(recipient_email: str, reset_url: str) -> None:
-        smtp_host = os.environ.get("SMTP_HOST", "").strip()
-        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-        smtp_user = os.environ.get("SMTP_USER", "").strip()
-        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
-        smtp_from = os.environ.get("SMTP_FROM", smtp_user or "noreply@example.com").strip()
-        if not smtp_host or not smtp_user or not smtp_password:
-            raise RuntimeError("Email sending is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASSWORD.")
-
-        message = EmailMessage()
-
-        effective_sender = smtp_from
-        if "gmail.com" in smtp_host.lower() or "googlemail.com" in smtp_host.lower():
-            effective_sender = smtp_user
-            if smtp_from.lower() != smtp_user.lower():
-                message["Reply-To"] = smtp_from
-
-        message["From"] = effective_sender
-        message["To"] = recipient_email
-        message["Subject"] = "SEMCDS password reset"
-        message.set_content(
-            "\n".join(
-                [
-                    "Hello,",
-                    "",
-                    "We received a request to reset your SEMCDS password.",
-                    f"Reset your password using this link: {reset_url}",
-                    "",
-                    "This link expires in 60 minutes.",
-                    "If you did not request a reset, you can ignore this email.",
-                ]
-            )
+        _send_email(
+            recipient_email,
+            "SEMCDS password reset",
+            [
+                "Hello,",
+                "",
+                "We received a request to reset your SEMCDS password.",
+                f"Reset your password using this secure link: {reset_url}",
+                "",
+                "This link expires in 60 minutes and becomes invalid after you change your password.",
+                "If you did not request a reset, you can ignore this email.",
+            ],
+            error_context="sending password reset email",
         )
 
-        context = ssl.create_default_context()
-        if smtp_port == 465:
-            smtp_client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context)
-        else:
-            smtp_client = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
-        try:
-            if smtp_port != 465:
-                smtp_client.ehlo()
-                smtp_client.starttls(context=context)
-                smtp_client.ehlo()
-            smtp_client.login(smtp_user, smtp_password)
-            smtp_client.send_message(message, from_addr=effective_sender)
-        except smtplib.SMTPAuthenticationError as exc:
-            raise RuntimeError(
-                "SMTP authentication failed. If you are using Gmail, set SMTP_USER to the Gmail address "
-                "and SMTP_PASSWORD to a Google App Password."
-            ) from exc
-        except smtplib.SMTPSenderRefused as exc:
-            raise RuntimeError(
-                "SMTP rejected the sender address. Set SMTP_FROM to the same mailbox as SMTP_USER, "
-                "or use a sender allowed by your mail provider."
-            ) from exc
-        except smtplib.SMTPException as exc:
-            raise RuntimeError(f"SMTP error while sending password reset email: {exc}") from exc
-        finally:
-            smtp_client.quit()
-
-    def _send_password_reset_code_email(recipient_email: str, reset_code: str) -> None:
-        smtp_host = os.environ.get("SMTP_HOST", "").strip()
-        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-        smtp_user = os.environ.get("SMTP_USER", "").strip()
-        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
-        smtp_from = os.environ.get("SMTP_FROM", smtp_user or "noreply@example.com").strip()
-        if not smtp_host or not smtp_user or not smtp_password:
-            raise RuntimeError("Email sending is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASSWORD.")
-
-        message = EmailMessage()
-
-        effective_sender = smtp_from
-        if "gmail.com" in smtp_host.lower() or "googlemail.com" in smtp_host.lower():
-            effective_sender = smtp_user
-            if smtp_from.lower() != smtp_user.lower():
-                message["Reply-To"] = smtp_from
-
-        message["From"] = effective_sender
-        message["To"] = recipient_email
-        message["Subject"] = "SEMCDS password reset code"
-        message.set_content(
-            "\n".join(
-                [
-                    "Hello,",
-                    "",
-                    "We received a request to reset your SEMCDS password.",
-                    f"Your 6-digit reset code is: {reset_code}",
-                    "",
-                    "This code expires in 10 minutes.",
-                    "If you did not request a reset, you can ignore this email.",
-                ]
-            )
+    def _password_reset_token_signature(user: dict) -> str:
+        payload = "|".join(
+            [
+                str(user.get("id", "")).strip(),
+                str(user.get("email", "")).strip().lower(),
+                str(user.get("password_hash", "")).strip(),
+                app.config["SECRET_KEY"],
+            ]
         )
-
-        context = ssl.create_default_context()
-        if smtp_port == 465:
-            smtp_client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20, context=context)
-        else:
-            smtp_client = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
-        try:
-            if smtp_port != 465:
-                smtp_client.ehlo()
-                smtp_client.starttls(context=context)
-                smtp_client.ehlo()
-            smtp_client.login(smtp_user, smtp_password)
-            smtp_client.send_message(message, from_addr=effective_sender)
-        except smtplib.SMTPAuthenticationError as exc:
-            raise RuntimeError(
-                "SMTP authentication failed. If you are using Gmail, set SMTP_USER to the Gmail address "
-                "and SMTP_PASSWORD to a Google App Password."
-            ) from exc
-        except smtplib.SMTPSenderRefused as exc:
-            raise RuntimeError(
-                "SMTP rejected the sender address. Set SMTP_FROM to the same mailbox as SMTP_USER, "
-                "or use a sender allowed by your mail provider."
-            ) from exc
-        except smtplib.SMTPException as exc:
-            raise RuntimeError(f"SMTP error while sending password reset code email: {exc}") from exc
-        finally:
-            smtp_client.quit()
-
-    def _purge_stale_password_reset_codes(ttl_seconds: int) -> None:
-        cutoff = datetime.now() - timedelta(seconds=ttl_seconds * 2)
-        stale_emails = []
-        for email, payload in _password_reset_code_store.items():
-            sent_at = payload.get("sent_at")
-            if not isinstance(sent_at, datetime):
-                stale_emails.append(email)
-                continue
-            if sent_at < cutoff:
-                stale_emails.append(email)
-        for email in stale_emails:
-            _password_reset_code_store.pop(email, None)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _build_password_reset_token(user: dict) -> str:
         return password_reset_serializer.dumps(
-            {"user_id": user.get("id", ""), "email": user.get("email", "")},
+            {
+                "user_id": user.get("id", ""),
+                "email": user.get("email", ""),
+                "signature": _password_reset_token_signature(user),
+            },
             salt=password_reset_salt,
         )
 
@@ -597,9 +977,10 @@ def create_app() -> Flask:
             return None
         user_id = str(payload.get("user_id", "")).strip()
         email = str(payload.get("email", "")).strip().lower()
-        if not user_id or not email:
+        signature = str(payload.get("signature", "")).strip().lower()
+        if not user_id or not email or not signature:
             return None
-        return {"user_id": user_id, "email": email}
+        return {"user_id": user_id, "email": email, "signature": signature}
 
     def decode_image_from_data_url(data_url: str) -> np.ndarray | None:
         if not data_url.startswith("data:image"):
@@ -615,13 +996,13 @@ def create_app() -> Flask:
     def normalize_schedule_input(raw_value: str) -> str:
         return raw_value.replace("T", " ").strip()
 
-    def compute_time_limit_minutes(scheduled_start: str, scheduled_end: str, fallback_minutes: int = 15) -> int:
+    def compute_time_limit_minutes(scheduled_start: str, scheduled_end: str, fallback_minutes: int = 0) -> int:
         start = parse_schedule(scheduled_start)
         end = parse_schedule(scheduled_end)
         if start and end and end > start:
             minutes = int((end - start).total_seconds() // 60)
             return max(1, minutes)
-        return max(1, fallback_minutes)
+        return max(0, fallback_minutes)
 
     def blank_quiz() -> dict:
         return {
@@ -629,7 +1010,8 @@ def create_app() -> Flask:
             "title": "",
             "description": "",
             "subject": "",
-            "time_limit_minutes": 15,
+            "assigned_section": "",
+            "time_limit_minutes": 0,
             "status": "draft",
             "quiz_code": "",
             "monitoring_enabled": False,
@@ -638,6 +1020,167 @@ def create_app() -> Flask:
             "questions": [],
             "total_points": 0,
         }
+
+    def available_student_sections(selected_section: str = "") -> list[str]:
+        sections = list(QUIZ_SECTION_OPTIONS)
+        seen = {section.casefold() for section in sections}
+        selected_clean = " ".join(str(selected_section or "").split())
+        if selected_clean and selected_clean.casefold() not in seen:
+            sections.append(selected_clean)
+        return sections
+
+    def student_identity_key(student_name: str, student_email: str) -> str:
+        normalized_email = student_email.strip().lower()
+        return normalized_email or f"unknown:{student_name.strip().lower()}"
+
+    def is_live_quiz(quiz: dict | None, now: datetime | None = None) -> bool:
+        if not quiz:
+            return False
+        return quiz.get("status") == "published" and schedule_status(quiz, now) == "open"
+
+    def connected_student_sessions_for_quiz(quiz: dict, now: datetime | None = None) -> list[dict]:
+        current_time = now or datetime.now()
+        active_attempts = {
+            str(attempt.get("id", "")): attempt
+            for attempt in quiz_attempts(quiz["id"])
+            if attempt.get("status") == "in_progress" and not attempt_has_expired(quiz, attempt, current_time)
+        }
+
+        if not socketio:
+            return [{"attempt": attempt, "participant": None} for attempt in active_attempts.values()]
+
+        room_key = f"monitor:{quiz['id']}"
+        participants = _monitor_rooms.get(room_key, {})
+        sessions: list[dict] = []
+        seen_attempt_ids: set[str] = set()
+        for participant in participants.values():
+            if participant.get("role") != "user":
+                continue
+            attempt_id = str(participant.get("attempt_id", "")).strip()
+            if not attempt_id or attempt_id in seen_attempt_ids:
+                continue
+            attempt = active_attempts.get(attempt_id)
+            if not attempt:
+                continue
+            seen_attempt_ids.add(attempt_id)
+            sessions.append({"attempt": attempt, "participant": participant})
+        return sessions
+
+    def build_in_progress_student_rows(
+        quiz_source: dict | list[dict] | None,
+        *,
+        severity: str = "all",
+        reviewed: str = "all",
+        search: str = "",
+        selected_student_email: str = "",
+        now: datetime | None = None,
+    ) -> list[dict]:
+        if not quiz_source:
+            return []
+
+        current_time = now or datetime.now()
+        severity_rank = {"low": 1, "medium": 2, "high": 3}
+        quiz_list = [quiz_source] if isinstance(quiz_source, dict) else list(quiz_source)
+        student_map: dict[str, dict] = {}
+
+        for quiz in quiz_list:
+            if not quiz:
+                continue
+            all_flags = quiz_flags(quiz["id"])
+            flags_by_attempt: dict[str, list[dict]] = {}
+            for flag in all_flags:
+                flags_by_attempt.setdefault(str(flag.get("attempt_id", "")), []).append(flag)
+
+            for session in connected_student_sessions_for_quiz(quiz, current_time):
+                attempt = session["attempt"]
+                student_name = str(attempt.get("student_name", "Unknown Student")).strip() or "Unknown Student"
+                student_email = str(attempt.get("student_email", "")).strip().lower()
+                student_key = student_identity_key(student_name, student_email)
+
+                if selected_student_email and student_key != selected_student_email:
+                    continue
+                if search and search not in student_name.lower() and search not in student_email.lower():
+                    continue
+
+                attempt_flags = flags_by_attempt.get(str(attempt.get("id", "")), [])
+                matching_flags = list(attempt_flags)
+                if severity != "all":
+                    matching_flags = [flag for flag in matching_flags if flag.get("flag_level") == severity]
+                if reviewed != "all":
+                    expected_reviewed = reviewed == "reviewed"
+                    matching_flags = [flag for flag in matching_flags if bool(flag.get("reviewed")) == expected_reviewed]
+
+                if (severity != "all" or reviewed != "all") and not matching_flags:
+                    continue
+
+                matching_flags.sort(key=lambda flag: sort_timestamp(flag.get("timestamp")), reverse=True)
+                latest_flag = matching_flags[0] if matching_flags else (attempt_flags[0] if attempt_flags else None)
+                entry = student_map.setdefault(
+                    student_key,
+                    {
+                        "student_key": student_key,
+                        "student_name": student_name,
+                        "student_email": student_email,
+                        "attempt_id": str(attempt.get("id", "")),
+                        "event_count": 0,
+                        "quiz_ids": set(),
+                        "highest_level": "low",
+                        "pending_count": 0,
+                        "reviewed_count": 0,
+                        "event_counter": Counter(),
+                        "latest_event": "Joined quiz",
+                        "latest_quiz": quiz.get("title", ""),
+                        "last_activity": "Currently Active",
+                        "status": "in_progress",
+                        "has_matching_activity": False,
+                    },
+                )
+
+                entry["quiz_ids"].add(quiz["id"])
+                entry["event_count"] += len(matching_flags)
+                entry["pending_count"] += sum(1 for flag in matching_flags if not flag.get("reviewed"))
+                entry["reviewed_count"] += sum(1 for flag in matching_flags if flag.get("reviewed"))
+                entry["event_counter"].update(activity_event_label(flag.get("event_type", "")) for flag in matching_flags)
+                entry["has_matching_activity"] = entry["has_matching_activity"] or bool(matching_flags)
+                if latest_flag:
+                    entry["latest_event"] = activity_event_label(latest_flag.get("event_type", ""))
+                    entry["latest_quiz"] = quiz.get("title", "")
+                    entry["last_activity"] = latest_flag.get("timestamp", "") or entry["last_activity"]
+
+                for flag in matching_flags:
+                    current_rank = severity_rank.get(flag.get("flag_level", "low"), 1)
+                    saved_rank = severity_rank.get(entry["highest_level"], 1)
+                    if current_rank >= saved_rank:
+                        entry["highest_level"] = str(flag.get("flag_level", "low"))
+
+        rows = [
+            {
+                "student_key": item["student_key"],
+                "student_name": item["student_name"],
+                "student_email": item["student_email"],
+                "attempt_id": item["attempt_id"],
+                "event_count": item["event_count"],
+                "quiz_count": len(item["quiz_ids"]),
+                "highest_level": item["highest_level"],
+                "pending_count": item["pending_count"],
+                "reviewed_count": item["reviewed_count"],
+                "event_tallies": item["event_counter"].most_common(3),
+                "latest_event": item["latest_event"],
+                "latest_quiz": item["latest_quiz"],
+                "last_activity": item["last_activity"],
+                "status": item["status"],
+                "has_matching_activity": item["has_matching_activity"],
+            }
+            for item in student_map.values()
+        ]
+        rows.sort(
+            key=lambda item: (
+                -severity_rank.get(item["highest_level"], 1),
+                -item["event_count"],
+                item["student_name"].lower(),
+            )
+        )
+        return rows
 
     def chunk_source_text(raw_text: str) -> list[str]:
         return [
@@ -1029,11 +1572,11 @@ def create_app() -> Flask:
 
     @app.context_processor
     def inject_globals():
-        role = session.get("role")
-        current_user = get_user_by_id(session.get("user_id", "")) if session.get("user_id") else None
+        current_user = current_session_user()
+        role = current_user.get("role") if current_user else None
         return {
             "current_role": role,
-            "current_user": current_user or (get_user(role) if role else None),
+            "current_user": current_user,
             "current_endpoint": request.endpoint,
         }
 
@@ -1041,7 +1584,8 @@ def create_app() -> Flask:
         def decorator(view):
             @wraps(view)
             def wrapped(*args, **kwargs):
-                role = session.get("role")
+                current_user = current_session_user()
+                role = current_user.get("role") if current_user else None
                 if not role:
                     return redirect_to("login")
                 if role not in allowed_roles:
@@ -1054,7 +1598,7 @@ def create_app() -> Flask:
 
     @app.route("/")
     def index():
-        if session.get("role") in {"admin", "user"}:
+        if current_session_user():
             return redirect_to("home")
         return render_template(
             "login.html",
@@ -1084,12 +1628,12 @@ def create_app() -> Flask:
             elif user["role"] != selected_role:
                 error = "This account does not match the selected portal."
             else:
+                session.clear()
                 session["role"] = user["role"]
                 session["user_id"] = user["id"]
+                session["avatar_url"] = _normalize_avatar_url(user.get("avatar_url"))
                 session.permanent = remember_me
-                # Store in shared session for other PCs on same ngrok URL
-                _shared_session["user_id"] = user["id"]
-                _shared_session["role"] = user["role"]
+                issue_csrf_token(force=True)
                 return redirect(url_for("home", login_success="1"))
 
         return render_template(
@@ -1114,9 +1658,13 @@ def create_app() -> Flask:
     @app.route("/google-callback")
     def google_callback():
         code = request.args.get("code", "").strip()
-        role = request.args.get("state", "user").strip()
+        callback_state = request.args.get("state", "").strip()
+        oauth_state = session.pop("google_oauth_state", None)
+        role = str((oauth_state or {}).get("role", "user")).strip()
         if role not in {"admin", "user"}:
             role = "user"
+        if not oauth_state or not callback_state or not secrets.compare_digest(str(oauth_state.get("value", "")), callback_state):
+            return redirect_to("login", role=role, error="Google login session expired. Please try again.")
         if not code:
             return redirect_to("login", role=role, error="Google login failed.")
         try:
@@ -1126,6 +1674,7 @@ def create_app() -> Flask:
 
         email = (profile.get("email") or "").strip().lower()
         full_name = (profile.get("name") or profile.get("given_name") or email).strip()
+        avatar_url = _normalize_avatar_url(profile.get("picture"))
         if not email:
             return redirect_to("login", role=role, error="Google did not return a valid email address.")
 
@@ -1146,10 +1695,16 @@ def create_app() -> Flask:
                 error="This student Google account is not invited yet. Ask your instructor to send an invitation first.",
             )
 
+        stored_avatar_url = _normalize_avatar_url(user.get("avatar_url"))
+        if avatar_url and avatar_url != stored_avatar_url:
+            set_user_avatar_url(user["id"], avatar_url)
+            stored_avatar_url = avatar_url
+
+        session.clear()
         session["role"] = role
         session["user_id"] = user["id"]
-        _shared_session["user_id"] = user["id"]
-        _shared_session["role"] = role
+        session["avatar_url"] = avatar_url or stored_avatar_url
+        issue_csrf_token(force=True)
         return redirect(url_for("home", login_success="1"))
 
     @app.route("/send-invitations", methods=["POST"])
@@ -1200,114 +1755,60 @@ def create_app() -> Flask:
         message = ""
         error = ""
         email_value = request.values.get("email", "").strip().lower()
-        resend_remaining_seconds = 0
-        password_reset_code_ttl_seconds = int(os.environ.get("PASSWORD_RESET_CODE_TTL_SECONDS", "600"))
-        resend_cooldown_seconds = 60
-
-        _purge_stale_password_reset_codes(password_reset_code_ttl_seconds)
 
         if request.method == "POST":
             email = request.form.get("email", "").strip().lower()
-            action = request.form.get("action", "send_code").strip().lower()
             email_value = email
-            user = get_user_by_email(email)
-
-            reset_record = _password_reset_code_store.get(email)
-            now = datetime.now()
-
-            if action == "send_code":
-                if user and reset_record and isinstance(reset_record.get("sent_at"), datetime):
-                    elapsed_seconds = int((now - reset_record["sent_at"]).total_seconds())
-                    if elapsed_seconds < resend_cooldown_seconds:
-                        resend_remaining_seconds = resend_cooldown_seconds - elapsed_seconds
-                        error = f"Please wait {resend_remaining_seconds}s before requesting a new code."
-
-                if not error and user:
-                    reset_code = f"{secrets.randbelow(1000000):06d}"
-                    _password_reset_code_store[email] = {
-                        "code": reset_code,
-                        "user_id": user["id"],
-                        "sent_at": now,
-                        "expires_at": now + timedelta(seconds=password_reset_code_ttl_seconds),
-                    }
+            if not email:
+                error = "Enter your email address."
+            elif not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+                error = "Enter a valid email address."
+            else:
+                user = get_user_by_email(email)
+                if user:
                     try:
-                        _send_password_reset_code_email(user["email"], reset_code)
+                        reset_token = _build_password_reset_token(user)
+                        reset_url = _current_external_url("reset_password", token=reset_token)
+                        _send_password_reset_email(user["email"], reset_url)
                     except RuntimeError as exc:
                         error = str(exc)
                     except Exception as exc:
-                        error = f"Unable to send reset code email right now. ({exc})"
+                        error = f"Unable to send reset email right now. ({exc})"
 
                 if not error:
-                    message = "If the email exists in the system, a 6-digit reset code was sent."
-
-            else:
-                code = request.form.get("code", "").strip()
-                password = request.form.get("password", "")
-                confirm_password = request.form.get("confirm_password", "")
-
-                if not email or not code or not password or not confirm_password:
-                    error = "Please complete all fields to reset your password."
-                elif len(code) != 6 or not code.isdigit():
-                    error = "Enter a valid 6-digit reset code."
-                elif not user:
-                    error = "Invalid email or reset code."
-                elif not reset_record:
-                    error = "Reset code not found or expired. Request a new code."
-                elif reset_record.get("user_id") != user.get("id"):
-                    error = "Invalid reset request. Please request a new code."
-                elif not isinstance(reset_record.get("expires_at"), datetime) or now > reset_record["expires_at"]:
-                    _password_reset_code_store.pop(email, None)
-                    error = "Reset code has expired. Request a new code."
-                elif str(reset_record.get("code", "")) != code:
-                    error = "Invalid reset code."
-                elif len(password) < 8:
-                    error = "Password must be at least 8 characters long."
-                elif password != confirm_password:
-                    error = "Passwords do not match."
-                elif not set_user_password(user["id"], password):
-                    error = "Unable to reset password right now. Please try again."
-                else:
-                    _password_reset_code_store.pop(email, None)
-                    return redirect(
-                        url_for(
-                            "login",
-                            message="Password reset successful. You can now sign in with your new password.",
-                            role=user.get("role", "admin"),
-                        )
-                    )
-
-            active_record = _password_reset_code_store.get(email)
-            if user and active_record and isinstance(active_record.get("sent_at"), datetime):
-                elapsed_seconds = int((datetime.now() - active_record["sent_at"]).total_seconds())
-                if elapsed_seconds < resend_cooldown_seconds:
-                    resend_remaining_seconds = max(resend_cooldown_seconds - elapsed_seconds, 0)
+                    message = "If the email exists in the system, a password reset link has been sent."
 
         return render_template(
             "forgot_password.html",
             message=message,
             error=error,
             email_value=email_value,
-            resend_remaining_seconds=resend_remaining_seconds,
         )
 
     @app.route("/reset-password/<token>", methods=["GET", "POST"])
     def reset_password(token: str):
+        invalid_token_message = "This password reset link is invalid, expired, or has already been used."
         token_payload = _read_password_reset_token(token)
         if not token_payload:
             return render_template(
                 "reset_password.html",
                 token_valid=False,
-                error="This password reset link is invalid or has expired.",
+                error=invalid_token_message,
                 success_message="",
                 token=token,
             )
 
         user = get_user_by_id(token_payload["user_id"])
-        if not user or user.get("email", "").strip().lower() != token_payload["email"]:
+        current_signature = _password_reset_token_signature(user or {})
+        if (
+            not user
+            or user.get("email", "").strip().lower() != token_payload["email"]
+            or not secrets.compare_digest(token_payload["signature"], current_signature)
+        ):
             return render_template(
                 "reset_password.html",
                 token_valid=False,
-                error="This password reset link is invalid or has expired.",
+                error=invalid_token_message,
                 success_message="",
                 token=token,
             )
@@ -1341,86 +1842,60 @@ def create_app() -> Flask:
             token=token,
         )
 
-    @app.route("/signin/<role>")
-    def signin(role: str):
-        if role not in {"admin", "user"}:
-            return redirect_to("login")
-        user = get_user(role)
-        session["role"] = role
-        session["user_id"] = user["id"]
-        _shared_session["user_id"] = user["id"]
-        _shared_session["role"] = role
-        return redirect_to("home")
-
-    @app.route("/logout")
+    @app.route("/logout", methods=["POST"])
     def logout():
         session.clear()
-        # Clear shared session when logging out
-        _shared_session.clear()
         return redirect(url_for("login", logout_success="1"))
-
-    @app.route("/api/shared-session", methods=["GET", "POST", "DELETE"])
-    def manage_shared_session():
-        """API to manage shared session for ngrok multi-device access."""
-        if request.method == "GET":
-            # Check if shared session is active
-            return jsonify({
-                "active": bool(_shared_session.get("user_id")),
-                "user_id": _shared_session.get("user_id", ""),
-                "role": _shared_session.get("role", ""),
-            })
-        elif request.method == "DELETE":
-            # Clear shared session
-            _shared_session.clear()
-            session.clear()
-            return jsonify({"success": True, "message": "Shared session cleared"})
-        return jsonify({"error": "Invalid method"}), 405
 
     @app.route("/home")
     def home():
-        role = session.get("role")
+        current_user = current_session_user()
+        role = current_user.get("role") if current_user else None
+        login_success = request.args.get("login_success") == "1"
         if role == "admin":
-            return redirect_to("dashboard")
+            return redirect_to("dashboard", login_success="1") if login_success else redirect_to("dashboard")
         if role == "user":
-            return redirect_to("student_dashboard")
+            return redirect_to("student_dashboard", login_success="1") if login_success else redirect_to("student_dashboard")
         return redirect_to("login")
 
     @app.route("/Dashboard")
     @role_required("admin")
     def dashboard():
+        current_time = datetime.now()
+        message = request.args.get("message", "").strip()
         selected_quiz = request.args.get("quizId", "").strip()
         analyzed = request.args.get("analyzed") == "1"
         all_quizzes = get_quizzes()
-        analyzable_quizzes = [quiz for quiz in all_quizzes if quiz["status"] == "published" and quiz["monitoring_enabled"]]
+        analyzable_quizzes = [quiz for quiz in all_quizzes if quiz["monitoring_enabled"]]
         valid_quiz_ids = {quiz["id"] for quiz in analyzable_quizzes}
         if selected_quiz not in valid_quiz_ids:
             selected_quiz = ""
             analyzed = False
-        month_param = request.args.get("month", datetime.now().strftime("%Y-%m"))
-        selected_day = request.args.get("day", "").strip()
+        month_param = request.args.get("month", current_time.strftime("%Y-%m"))
+        selected_day_value = parse_dashboard_day_key(request.args.get("day", ""))
         try:
             current_month = datetime.strptime(month_param, "%Y-%m")
         except ValueError:
-            current_month = datetime.now().replace(day=1)
+            current_month = (selected_day_value or current_time).replace(day=1)
+        if selected_day_value and (selected_day_value.year != current_month.year or selected_day_value.month != current_month.month):
+            current_month = selected_day_value.replace(day=1)
         calendar_rows = build_dashboard_calendar(current_month.year, current_month.month)
-        selected_day_quizzes = []
-        if selected_day:
-            for week in calendar_rows:
-                for day in week:
-                    if day["key"] == selected_day:
-                        selected_day_quizzes = day["quizzes"]
-                        break
+        selected_day = selected_day_value.strftime("%Y-%m-%d") if selected_day_value else ""
+        selected_day_quizzes = scheduled_quizzes_for_day(selected_day_value) if selected_day_value else []
         prev_month = current_month.month - 1 or 12
         prev_year = current_month.year - 1 if current_month.month == 1 else current_month.year
         next_month = 1 if current_month.month == 12 else current_month.month + 1
         next_year = current_month.year + 1 if current_month.month == 12 else current_month.year
+        recent_quizzes = all_quizzes[:4]
+        recent_attempts = [attempt for quiz in recent_quizzes for attempt in quiz_attempts(quiz["id"])]
         return render_template(
             "dashboard.html",
+            message=message,
             stats=dashboard_stats(),
-            recent_quizzes=all_quizzes[:4],
+            recent_quizzes=recent_quizzes,
             summary=cheating_summary(selected_quiz) if selected_quiz and analyzed else None,
             quizzes=analyzable_quizzes,
-            attempts=[],
+            attempts=recent_attempts,
             selected_quiz=selected_quiz,
             analyzed=analyzed,
             calendar_rows=calendar_rows,
@@ -1429,50 +1904,145 @@ def create_app() -> Flask:
             prev_month=f"{prev_year:04d}-{prev_month:02d}",
             next_month=f"{next_year:04d}-{next_month:02d}",
             selected_day=selected_day,
+            selected_day_label=format_dashboard_day_label(selected_day_value),
+            selected_day_checked_at=format_current_timestamp(current_time) if selected_day_value else "",
             selected_day_quizzes=selected_day_quizzes,
             format_schedule=format_schedule,
             schedule_status=schedule_status,
         )
 
+    @app.route("/api/dashboard/schedule")
+    @role_required("admin")
+    def dashboard_schedule_api():
+        selected_day_value = parse_dashboard_day_key(request.args.get("day", ""))
+        if not selected_day_value:
+            return jsonify({"message": "Choose a valid schedule date."}), 400
+
+        current_time = datetime.now()
+        selected_day_quizzes = scheduled_quizzes_for_day(selected_day_value)
+        return jsonify(
+            {
+                "day": selected_day_value.strftime("%Y-%m-%d"),
+                "day_label": format_dashboard_day_label(selected_day_value),
+                "month": selected_day_value.strftime("%Y-%m"),
+                "month_label": selected_day_value.strftime("%B %Y"),
+                "checked_at": format_current_timestamp(current_time),
+                "quizzes": [
+                    {
+                        "id": quiz["id"],
+                        "title": quiz.get("title", "Untitled Quiz"),
+                        "status": schedule_status(quiz, current_time),
+                        "scheduled_start_label": format_schedule(quiz.get("scheduled_start")),
+                        "scheduled_end_label": format_schedule(quiz.get("scheduled_end")),
+                    }
+                    for quiz in selected_day_quizzes
+                ],
+            }
+        ), 200
+
+    @app.route("/Dashboard/ResetData", methods=["POST"])
+    @role_required("admin")
+    def dashboard_reset_data():
+        reset_summary = reset_dashboard_data()
+        _monitor_rooms.clear()
+        _detection_event_cache.clear()
+
+        if any(reset_summary.values()):
+            message = (
+                "Dashboard data reset. "
+                f"Cleared {reset_summary['attempts']} attempt(s), "
+                f"{reset_summary['responses']} response(s), and "
+                f"{reset_summary['activity_logs']} activity log(s)."
+            )
+        else:
+            message = "Dashboard data is already clear."
+        return redirect_to("dashboard", message=message)
+
     @app.route("/QuizManager")
     @role_required("admin")
     def quiz_manager():
-        status_filter = request.args.get("status", "all")
-        search = request.args.get("q", "").strip().lower()
+        user = current_session_user()
+        if not user or user.get("role") != "admin":
+            return redirect_to("login")
+        status_filter = request.args.get("status", "all").strip().lower()
+        if status_filter not in {"all", "draft", "published", "closed"}:
+            status_filter = "all"
+        search = request.args.get("q", "").strip()
+        search_term = search.casefold()
         message = request.args.get("message", "").strip()
-        all_quizzes = get_quizzes()
+        all_quizzes = [
+            quiz
+            for quiz in get_quizzes()
+            if str(quiz.get("creator_id", "")).strip() == str(user["id"]).strip()
+        ]
         quizzes = all_quizzes if status_filter == "all" else [quiz for quiz in all_quizzes if quiz["status"] == status_filter]
-        if search:
+        if search_term:
             quizzes = [
                 quiz
                 for quiz in quizzes
-                if search in quiz["title"].lower()
-                or search in quiz["subject"].lower()
-                or search in quiz["quiz_code"].lower()
+                if search_term in quiz["title"].casefold()
+                or search_term in quiz["subject"].casefold()
+                or search_term in quiz["quiz_code"].casefold()
             ]
+        quiz_attempt_totals = {
+            quiz["id"]: sum(
+                1 for attempt in quiz_attempts(quiz["id"])
+                if attempt.get("status") in {"submitted", "auto_submitted"}
+            )
+            for quiz in quizzes
+        }
         return render_template(
             "quiz_manager.html",
             quizzes=quizzes,
             status_filter=status_filter,
             search=search,
             message=message,
-            attempts=[attempt for quiz in all_quizzes for attempt in quiz_attempts(quiz["id"])],
+            has_active_filters=bool(search or status_filter != "all"),
+            filtered_quiz_count=len(quizzes),
+            total_quizzes_count=len(all_quizzes),
+            quiz_attempt_totals=quiz_attempt_totals,
         )
 
     @app.route("/QuizAction", methods=["POST"])
     @role_required("admin")
     def quiz_action():
+        user = current_session_user()
+        if not user or user.get("role") != "admin":
+            return redirect_to("login")
+
         quiz_id = request.form.get("quiz_id", "").strip()
         action = request.form.get("action", "").strip()
         message = ""
+        owned_quizzes = [
+            quiz
+            for quiz in get_quizzes()
+            if str(quiz.get("creator_id", "")).strip() == str(user["id"]).strip()
+        ]
 
-        if get_quiz(quiz_id) and action == "close":
+        if action == "clear_all_created":
+            if not owned_quizzes:
+                message = "You do not have any created quizzes to clear."
+            else:
+                for quiz in owned_quizzes:
+                    delete_quiz_by_id(quiz["id"])
+                cleared_count = len(owned_quizzes)
+                message = f"Cleared {cleared_count} quiz{'zes' if cleared_count != 1 else ''} you created."
+            return redirect_to("quiz_manager", message=message)
+
+        quiz = get_quiz(quiz_id) if quiz_id else None
+        if not quiz:
+            return redirect_to("quiz_manager", message="Action could not be completed.")
+
+        if str(quiz.get("creator_id", "")).strip() != str(user["id"]).strip():
+            return redirect_to("quiz_manager", message="You can only manage quizzes you created.")
+
+        if action == "close":
             set_quiz_status(quiz_id, "closed")
             message = "Quiz closed successfully."
-        elif get_quiz(quiz_id) and action == "reopen":
+        elif action == "reopen":
             set_quiz_status(quiz_id, "draft")
             return redirect_to("create_quiz", quizId=quiz_id)
-        elif get_quiz(quiz_id) and action == "delete":
+        elif action == "delete":
             delete_quiz_by_id(quiz_id)
             message = "Quiz deleted successfully."
         else:
@@ -1512,17 +2082,23 @@ def create_app() -> Flask:
         if request.method == "POST":
             quiz_id = request.form.get("quiz_id", "").strip()
             action = request.form.get("action", "draft").strip()
-            user = get_user("admin")
+            user = current_session_user()
+            if not user or user.get("role") != "admin":
+                return redirect_to("login")
             title = request.form.get("title", "").strip()
             description = request.form.get("description", "").strip()
             subject = request.form.get("subject", "").strip()
+            assigned_section = request.form.get("assigned_section", "").strip()
+            allowed_sections = {section.casefold(): section for section in available_student_sections()}
+            if assigned_section:
+                assigned_section = allowed_sections.get(assigned_section.casefold(), "")
             quiz_code = request.form.get("quiz_code", "").strip().upper() or f"QUIZ-{datetime.now().strftime('%H%M%S')}"
             scheduled_start = normalize_schedule_input(request.form.get("scheduled_start", ""))
             scheduled_end = normalize_schedule_input(request.form.get("scheduled_end", ""))
             time_limit_minutes = compute_time_limit_minutes(
                 scheduled_start,
                 scheduled_end,
-                int(request.form.get("time_limit_minutes", "15") or 15),
+                int(request.form.get("time_limit_minutes", "0") or 0),
             )
             monitoring_enabled = request.form.get("monitoring_enabled") == "on"
             questions_payload = json.loads(request.form.get("questions_payload", "[]") or "[]")
@@ -1540,6 +2116,7 @@ def create_app() -> Flask:
                 scheduled_end=scheduled_end,
                 status="published" if action == "publish" else "draft",
                 questions_payload=questions_payload,
+                assigned_section=assigned_section,
             )
             message = "Quiz published successfully." if action == "publish" else "Draft saved successfully."
             return redirect_to("quiz_manager", message=message)
@@ -1552,6 +2129,7 @@ def create_app() -> Flask:
             "create_quiz.html",
             sample_quiz=sample_quiz,
             is_edit_mode=is_edit_mode,
+            available_sections=available_student_sections(sample_quiz.get("assigned_section", "")),
             format_schedule_input=lambda value: value.replace(" ", "T") if value else "",
         )
 
@@ -1563,53 +2141,105 @@ def create_app() -> Flask:
             return redirect_to("quiz_manager", message="Create a quiz first before viewing results.")
         quiz_id = request.args.get("quizId", quizzes[0]["id"])
         quiz = get_quiz(quiz_id) or quizzes[0]
-        attempts = quiz_attempts(quiz["id"])
-        flags = quiz_flags(quiz["id"])
-        average = round(sum(item["percentage"] for item in attempts) / len(attempts), 1) if attempts else 0
-        highest = max((item["percentage"] for item in attempts), default=0)
+        results_context = build_quiz_results_context(quiz)
         return render_template(
             "quiz_results.html",
             quiz=quiz,
-            attempts=attempts,
-            metrics={
-                "submissions": len(attempts),
-                "average_score": average,
-                "highest_score": highest,
-                "flags_count": len(flags),
+            **results_context,
+        )
+
+    @app.route("/QuizResults/ExportCsv")
+    @role_required("admin")
+    def export_quiz_results_csv():
+        quizzes = get_quizzes()
+        if not quizzes:
+            return redirect_to("quiz_manager", message="Create a quiz first before exporting results.")
+
+        quiz_id = request.args.get("quizId", quizzes[0]["id"])
+        quiz = get_quiz(quiz_id) or quizzes[0]
+        results_context = build_quiz_results_context(quiz)
+
+        csv_buffer = StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow([
+            "Rank",
+            "Name",
+            "Email",
+            "Score",
+            "Total Points",
+            "Percentage",
+            "Status",
+            "Flag Count",
+            "Submission Time",
+            "Started At",
+        ])
+        for attempt in results_context["attempts"]:
+            writer.writerow([
+                attempt.get("rank") or "",
+                attempt.get("student_name", ""),
+                attempt.get("student_email", ""),
+                int(attempt.get("score", 0) or 0),
+                int(attempt.get("total_points", 0) or 0),
+                f"{float(attempt.get('percentage', 0) or 0):.2f}",
+                attempt_status_label(attempt.get("status")),
+                results_context["flags_by_attempt"].get(str(attempt.get("id", "")).strip(), 0),
+                attempt.get("submitted_at") or "Still active",
+                attempt.get("started_at") or "",
+            ])
+
+        return Response(
+            csv_buffer.getvalue(),
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{quiz_results_csv_filename(quiz)}"',
             },
-            all_flags=flags,
         )
 
     @app.route("/ActivityMonitor")
     @role_required("admin")
     def activity_monitor():
+        current_time = datetime.now()
         requested_quiz_id = request.args.get("quizId", "").strip()
         live_quiz_id = request.args.get("liveQuizId", "").strip()
         live_mode = request.args.get("live") == "1"
-        severity = request.args.get("severity", "all")
-        reviewed = request.args.get("reviewed", "all")
+        severity = request.args.get("severity", "all").strip().lower()
+        reviewed = request.args.get("reviewed", "all").strip().lower()
+        if severity not in {"all", "low", "medium", "high"}:
+            severity = "all"
+        if reviewed not in {"all", "pending", "reviewed"}:
+            reviewed = "all"
         search = request.args.get("student", "").lower().strip()
         selected_student_email = request.args.get("studentEmail", "").strip().lower()
         all_quizzes = get_quizzes()
-        monitorable_quizzes = [
-            quiz for quiz in all_quizzes
-            if quiz.get("status") == "published" and quiz.get("monitoring_enabled")
-        ]
+        reviewable_quizzes = [quiz for quiz in all_quizzes if quiz.get("monitoring_enabled")]
+        live_monitorable_quizzes = [quiz for quiz in reviewable_quizzes if is_live_quiz(quiz, current_time)]
 
         preferred_quiz = next(
-            (quiz for quiz in monitorable_quizzes if schedule_status(quiz) == "open"),
+            (quiz for quiz in live_monitorable_quizzes if is_live_quiz(quiz, current_time)),
             None,
         )
         if not preferred_quiz:
-            preferred_quiz = monitorable_quizzes[0] if monitorable_quizzes else (all_quizzes[0] if all_quizzes else None)
+            preferred_quiz = (
+                live_monitorable_quizzes[0]
+                if live_monitorable_quizzes
+                else (reviewable_quizzes[0] if reviewable_quizzes else (all_quizzes[0] if all_quizzes else None))
+            )
 
-        valid_quiz_ids = {quiz["id"] for quiz in all_quizzes}
+        selectable_quizzes = reviewable_quizzes or all_quizzes
+        valid_quiz_ids = {quiz["id"] for quiz in selectable_quizzes}
         if requested_quiz_id and requested_quiz_id != "all" and requested_quiz_id not in valid_quiz_ids:
             requested_quiz_id = ""
 
         quiz_id = requested_quiz_id or (preferred_quiz["id"] if preferred_quiz else "all")
+        selected_quiz_record = get_quiz(quiz_id) if quiz_id and quiz_id != "all" else None
+        realtime_quizzes = (
+            live_monitorable_quizzes
+            if quiz_id == "all"
+            else ([selected_quiz_record] if is_live_quiz(selected_quiz_record, current_time) else [])
+        )
+        using_live_student_rows = bool(realtime_quizzes)
         filtered_logs = []
-        for quiz in all_quizzes:
+        for quiz in selectable_quizzes:
             filtered_logs.extend(quiz_flags(quiz["id"]))
         if quiz_id and quiz_id != "all":
             filtered_logs = [flag for flag in filtered_logs if flag["quiz_id"] == quiz_id]
@@ -1623,18 +2253,36 @@ def create_app() -> Flask:
                 flag for flag in filtered_logs
                 if search in flag["student_name"].lower() or search in flag["student_email"].lower()
             ]
+        filtered_logs.sort(key=lambda flag: sort_timestamp(flag.get("timestamp")), reverse=True)
+
+        live_student_rows = build_in_progress_student_rows(
+            realtime_quizzes,
+            severity=severity,
+            reviewed=reviewed,
+            search=search,
+            selected_student_email=selected_student_email,
+            now=current_time,
+        ) if using_live_student_rows else []
 
         student_options_map: dict[str, dict] = {}
         for flag in filtered_logs:
             student_email = str(flag.get("student_email", "")).strip().lower()
             student_name = str(flag.get("student_name", "Unknown Student")).strip() or "Unknown Student"
-            if not student_email:
-                student_email = f"unknown:{student_name.lower()}"
-            if student_email not in student_options_map:
-                student_options_map[student_email] = {
+            student_key = student_identity_key(student_name, student_email)
+            if student_key not in student_options_map:
+                student_options_map[student_key] = {
                     "student_email": str(flag.get("student_email", "")).strip(),
                     "student_name": student_name,
                 }
+        for row in live_student_rows:
+            student_key = row["student_key"]
+            student_options_map.setdefault(
+                student_key,
+                {
+                    "student_email": row["student_email"],
+                    "student_name": row["student_name"],
+                },
+            )
         student_options = sorted(
             student_options_map.values(),
             key=lambda item: (item["student_name"].lower(), item["student_email"].lower()),
@@ -1646,10 +2294,16 @@ def create_app() -> Flask:
         if selected_student_email:
             filtered_logs = [
                 flag for flag in filtered_logs
-                if (str(flag.get("student_email", "")).strip().lower() or f"unknown:{str(flag.get('student_name', '')).strip().lower()}") == selected_student_email
+                if (
+                    student_identity_key(
+                        str(flag.get("student_name", "Unknown Student")),
+                        str(flag.get("student_email", "")),
+                    )
+                    == selected_student_email
+                )
             ]
 
-        quiz_lookup = {quiz["id"]: quiz for quiz in (monitorable_quizzes or all_quizzes)}
+        quiz_lookup = {quiz["id"]: quiz for quiz in all_quizzes}
         severity_rank = {"low": 1, "medium": 2, "high": 3}
         student_activity_map: dict[str, dict] = {}
         for flag in filtered_logs:
@@ -1657,7 +2311,7 @@ def create_app() -> Flask:
             student_name = str(flag.get("student_name", "Unknown Student")).strip() or "Unknown Student"
             student_key = student_email or f"unknown:{student_name.lower()}"
             quiz_title = quiz_lookup.get(flag["quiz_id"], {}).get("title", flag["quiz_id"])
-            event_label = str(flag.get("event_type", "")).replace("_", " ").title() or "Activity Event"
+            event_label = activity_event_label(flag.get("event_type", ""))
             entry = student_activity_map.setdefault(
                 student_key,
                 {
@@ -1687,10 +2341,10 @@ def create_app() -> Flask:
                 entry["highest_level"] = flag.get("flag_level", "low")
             if not entry["last_activity"]:
                 entry["last_activity"] = flag.get("timestamp", "")
-                entry["latest_event"] = str(flag.get("event_type", "")).replace("_", " ").title()
+                entry["latest_event"] = activity_event_label(flag.get("event_type", ""))
                 entry["latest_quiz"] = quiz_title
 
-        student_activity_rows = sorted(
+        historical_student_rows = sorted(
             [
                 {
                     **item,
@@ -1706,96 +2360,152 @@ def create_app() -> Flask:
             ),
         )
 
+        student_activity_rows = live_student_rows if using_live_student_rows else historical_student_rows
+
         selected_student = next(
-            (row for row in student_activity_rows if (row["student_email"].strip().lower() or f"unknown:{row['student_name'].lower()}") == selected_student_email),
+            (
+                row for row in student_activity_rows
+                if (
+                    student_identity_key(row["student_name"], row["student_email"])
+                    == selected_student_email
+                )
+            ),
             None,
         )
+        if not selected_student:
+            selected_student = next(
+                (
+                    row for row in historical_student_rows
+                    if student_identity_key(row["student_name"], row["student_email"]) == selected_student_email
+                ),
+                None,
+            )
 
-        if live_quiz_id and live_quiz_id not in valid_quiz_ids:
+        valid_live_quiz_ids = {quiz["id"] for quiz in live_monitorable_quizzes}
+        if live_quiz_id and live_quiz_id not in valid_live_quiz_ids:
             live_quiz_id = ""
 
         if not live_quiz_id:
-            preferred_live_quiz = get_quiz(quiz_id) if quiz_id and quiz_id != "all" else preferred_quiz
+            preferred_live_quiz = (
+                get_quiz(quiz_id)
+                if quiz_id and quiz_id != "all" and quiz_id in valid_live_quiz_ids
+                else (preferred_quiz if preferred_quiz and preferred_quiz["id"] in valid_live_quiz_ids else None)
+            )
             if preferred_live_quiz:
                 live_quiz_id = preferred_live_quiz["id"]
             else:
                 in_progress_quiz = next(
-                    (quiz for quiz in monitorable_quizzes if any(attempt["status"] == "in_progress" for attempt in quiz_attempts(quiz["id"]))),
+                    (
+                        quiz
+                        for quiz in live_monitorable_quizzes
+                        if any(
+                            attempt.get("status") == "in_progress"
+                            and not attempt_has_expired(quiz, attempt, current_time)
+                            for attempt in quiz_attempts(quiz["id"])
+                        )
+                    ),
                     None,
                 )
                 if in_progress_quiz:
                     live_quiz_id = in_progress_quiz["id"]
 
-        active_quiz = get_quiz(quiz_id) if quiz_id and quiz_id != "all" else preferred_quiz
-        active_students = [attempt for attempt in quiz_attempts(active_quiz["id"]) if attempt["status"] == "in_progress"] if active_quiz else []
         live_quiz = get_quiz(live_quiz_id) if live_quiz_id else None
-        live_logs = quiz_flags(live_quiz["id"]) if live_quiz else []
-        live_students = [attempt for attempt in quiz_attempts(live_quiz["id"]) if attempt["status"] == "in_progress"] if live_quiz else []
-        latest_detection_by_attempt: dict[str, dict] = {}
-        for flag in live_logs:
-            attempt_id = str(flag.get("attempt_id", "")).strip()
-            if not attempt_id or attempt_id in latest_detection_by_attempt:
-                continue
-            latest_detection_by_attempt[attempt_id] = {
-                "event": flag.get("event_type", ""),
-                "description": flag.get("event_description", ""),
-                "flag_level": flag.get("flag_level", "low"),
-                "timestamp": flag.get("timestamp", ""),
-            }
-
-        live_student_rows = []
-        for attempt in live_students:
-            latest = latest_detection_by_attempt.get(attempt.get("id", ""), {})
-            live_student_rows.append(
-                {
-                    "attempt_id": attempt.get("id", ""),
-                    "student_name": attempt.get("student_name", "Student"),
-                    "student_email": attempt.get("student_email", ""),
-                    "camera_on": False,
-                    "detection_status": latest.get("event") or "normal",
-                    "flag_level": latest.get("flag_level", "low"),
-                    "updated_at": latest.get("timestamp") or attempt.get("started_at", ""),
-                }
-            )
 
         return render_template(
             "activity_monitor.html",
-            stats=activity_stats(),
+            stats=build_activity_stats(filtered_logs),
             logs=filtered_logs,
             student_activity_rows=student_activity_rows,
             student_options=student_options,
             selected_student=selected_student,
             selected_student_email=selected_student_email,
             quiz_lookup=quiz_lookup,
-            quizzes=monitorable_quizzes or all_quizzes,
+            quizzes=selectable_quizzes,
             selected_quiz=quiz_id,
             selected_severity=severity,
             selected_reviewed=reviewed,
             search=search,
-            active_quiz=active_quiz,
-            active_students=active_students,
-            live_mode=live_mode and bool(live_quiz),
+            live_mode=live_mode,
             live_quiz=live_quiz,
-            live_logs=live_logs,
-            live_students=live_students,
-            live_student_rows=live_student_rows,
             live_quiz_id=live_quiz_id,
+            realtime_quiz_ids=[quiz["id"] for quiz in realtime_quizzes],
             realtime_enabled=bool(socketio),
         )
+
+    @app.route("/api/quiz/<quiz_id>/in-progress-students")
+    @role_required("admin")
+    def get_in_progress_students(quiz_id: str):
+        """Return all students currently taking a quiz with their activity flags."""
+        severity = request.args.get("severity", "all").strip().lower()
+        reviewed = request.args.get("reviewed", "all").strip().lower()
+        search = request.args.get("student", "").strip().lower()
+        selected_student_email = request.args.get("studentEmail", "").strip().lower()
+        if severity not in {"all", "low", "medium", "high"}:
+            severity = "all"
+        if reviewed not in {"all", "pending", "reviewed"}:
+            reviewed = "all"
+
+        current_time = datetime.now()
+        if quiz_id == "all":
+            quizzes = [
+                quiz for quiz in get_quizzes()
+                if quiz.get("monitoring_enabled") and is_live_quiz(quiz, current_time)
+            ]
+        else:
+            quiz = get_quiz(quiz_id)
+            if not quiz:
+                return jsonify({"students": [], "error": "Quiz not found"}), 404
+            quizzes = [quiz] if is_live_quiz(quiz, current_time) else []
+
+        students = build_in_progress_student_rows(
+            quizzes,
+            severity=severity,
+            reviewed=reviewed,
+            search=search,
+            selected_student_email=selected_student_email,
+            now=current_time,
+        )
+        return jsonify({"students": students}), 200
 
     @app.route("/StudentDashboard")
     @role_required("user")
     def student_dashboard():
-        user = get_user_by_id(session.get("user_id", "")) or get_user("user")
+        user = current_session_user()
+        if not user:
+            return redirect_to("login")
+        current_time = datetime.now()
         summary = student_dashboard_summary(user["email"])
+        available_quiz_cards = []
+        for quiz in open_quizzes():
+            latest_attempt = get_quiz_attempt_for_student(quiz["id"], user["id"])
+            if latest_attempt and latest_attempt.get("status") in {"submitted", "auto_submitted"}:
+                continue
+            access_allowed, _ = quiz_access_state(quiz, user["id"], now=current_time)
+            if not access_allowed:
+                continue
+            available_quiz_cards.append(
+                {
+                    "quiz": quiz,
+                    "window": student_quiz_window_summary(quiz, current_time),
+                    "is_in_progress": bool(latest_attempt and latest_attempt.get("status") == "in_progress"),
+                }
+            )
+
+        available_quiz_cards.sort(
+            key=lambda item: (
+                parse_schedule(item["quiz"].get("scheduled_end")) or datetime.max,
+                parse_schedule(item["quiz"].get("scheduled_start")) or datetime.min,
+                item["quiz"].get("title", "").lower(),
+            )
+        )
         return render_template(
             "student_dashboard.html",
-            open_quiz_list=open_quizzes(),
-            attempts=student_attempts(user["email"]),
+            available_quiz_cards=available_quiz_cards,
             summary=summary,
             user=user,
             format_schedule=format_schedule,
             schedule_status=schedule_status,
+            availability_checked_at=format_current_timestamp(current_time),
         )
 
     @app.route("/StudentCamera")
@@ -1918,6 +2628,7 @@ def create_app() -> Flask:
             result_state = "cheat"
             result_message = "cheat"
             flag_level = "high"
+            event_type = "cheat"
         else:
             result_state = "normal"
             result_message = "normal"
@@ -1936,7 +2647,7 @@ def create_app() -> Flask:
             "flag_level": flag_level,
         }
 
-        user = get_user_by_id(session.get("user_id", "")) or get_user("user")
+        user = current_session_user()
         attempt = get_attempt(attempt_id) if attempt_id else None
         valid_attempt = bool(
             attempt
@@ -1946,19 +2657,6 @@ def create_app() -> Flask:
             and attempt.get("student_id") == user.get("id")
             and attempt.get("status") == "in_progress"
         )
-
-        if socketio and quiz_id and valid_attempt:
-            socketio.emit(
-                "detection_update",
-                {
-                    "quizId": quiz_id,
-                    "attemptId": attempt_id,
-                    "studentName": attempt.get("student_name", "Student"),
-                    "studentEmail": attempt.get("student_email", ""),
-                    "detection": detection_status,
-                },
-                to=f"monitor:{quiz_id}",
-            )
 
         created_log = None
         if valid_attempt and event_type == "cheat" and _should_log_detection_event(attempt_id, event_type):
@@ -1988,52 +2686,122 @@ def create_app() -> Flask:
         quiz = get_quiz_by_code(code) if code else None
         access_allowed = False
         access_message = None
-        user = get_user_by_id(session.get("user_id", "")) or get_user("user")
+        lookup_message = ""
+        user = current_session_user()
+        if not user:
+            return redirect_to("login")
         if quiz:
-            access_allowed, access_message = quiz_access_state(quiz, user["id"] if user else None)
+            access_allowed, access_message = quiz_access_state(quiz, user["id"])
+        elif code:
+            lookup_message = "No quiz was found for that access code. Double-check the code and try again."
         return render_template(
             "join_quiz.html",
             quiz=quiz,
             code=code,
             access_allowed=access_allowed,
             access_message=access_message,
+            lookup_message=lookup_message,
             format_schedule=format_schedule,
             schedule_status=schedule_status,
         )
 
     @app.route("/TakeQuiz", methods=["GET", "POST"])
-    @role_required("admin", "user")
+    @role_required("user")
     def take_quiz():
         quiz_id = request.values.get("quizId", "").strip()
         quiz = get_quiz(quiz_id) if quiz_id else None
         if not quiz:
             return redirect_to("student_dashboard")
-        access_allowed, access_message = quiz_access_state(quiz, session.get("user_id", ""))
-        user = get_user_by_id(session.get("user_id", "")) or get_user("user")
-        submitted = False
+        user = current_session_user()
+        if not user:
+            return redirect_to("login")
+        current_time = datetime.now()
+        latest_attempt = get_quiz_attempt_for_student(quiz["id"], user["id"])
+        submitted = request.args.get("submitted") == "1"
         attempt = None
         active_attempt_id = ""
+        countdown_seconds = None
+        submission_error = ""
+        submitted_answers: dict[str, str] = {}
 
-        if request.method == "GET" and access_allowed and user:
-            active_attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], False)
+        if submitted:
+            submitted_attempt = get_attempt(request.args.get("attemptId", "").strip())
+            if submitted_attempt and submitted_attempt.get("quiz_id") == quiz["id"] and submitted_attempt.get("student_id") == user["id"]:
+                attempt = submitted_attempt
+            else:
+                submitted = False
 
-        if request.method == "POST" and access_allowed:
-            answers = {question["id"]: request.form.get(f"question_{question['id']}", "") for question in quiz["questions"]}
-            consent_given = request.form.get("consent_given") == "on" or not quiz["monitoring_enabled"]
+        if request.method == "POST" and not submitted:
             attempt_id = request.form.get("attempt_id", "").strip()
             if attempt_id:
                 attempt = get_attempt(attempt_id)
                 valid_owner = bool(attempt and attempt.get("quiz_id") == quiz["id"] and attempt.get("student_id") == user["id"])
                 if not valid_owner:
+                    attempt = None
                     attempt_id = ""
-            if not attempt_id:
-                attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], consent_given)
-            attempt_id = finalize_quiz_attempt(attempt_id, answers, consent_given)
-            return redirect_to("take_quiz", quizId=quiz["id"], submitted=1, attemptId=attempt_id)
+            if not attempt_id and latest_attempt and latest_attempt.get("status") == "in_progress":
+                attempt = latest_attempt
+                attempt_id = latest_attempt["id"]
 
-        if request.args.get("submitted") == "1":
-            submitted = True
-            attempt = get_attempt(request.args.get("attemptId", ""))
+            access_allowed, access_message = quiz_access_state(quiz, user["id"], now=current_time)
+            if attempt_id or access_allowed:
+                if not attempt_id:
+                    attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], False)
+                    attempt = get_attempt(attempt_id)
+                answers = {
+                    question["id"]: request.form.get(f"question_{question['id']}", "").strip()
+                    for question in quiz["questions"]
+                }
+                submitted_answers = dict(answers)
+                consent_given = request.form.get("consent_given") == "on" or not quiz["monitoring_enabled"]
+                is_overdue_submission = attempt_has_expired(quiz, attempt, current_time)
+                if not is_overdue_submission:
+                    unanswered_numbers = [
+                        index
+                        for index, question in enumerate(quiz["questions"], start=1)
+                        if not answers.get(question["id"], "")
+                    ]
+                    if unanswered_numbers:
+                        label = "question" if len(unanswered_numbers) == 1 else "questions"
+                        submission_error = (
+                            f"Answer all questions before submitting. Missing {label}: "
+                            f"{', '.join(str(number) for number in unanswered_numbers)}."
+                        )
+                        active_attempt_id = attempt_id
+                        countdown_seconds = remaining_attempt_seconds(quiz, attempt, current_time)
+                    else:
+                        attempt_id = finalize_quiz_attempt(attempt_id, answers, consent_given, status="submitted")
+                        return redirect_to("take_quiz", quizId=quiz["id"], submitted=1, attemptId=attempt_id)
+                else:
+                    attempt_id = finalize_quiz_attempt(attempt_id, answers, consent_given, status="auto_submitted")
+                    return redirect_to("take_quiz", quizId=quiz["id"], submitted=1, attemptId=attempt_id)
+
+        if not submitted and latest_attempt and latest_attempt.get("status") == "in_progress" and attempt_has_expired(quiz, latest_attempt, current_time):
+            expired_attempt_id = finalize_quiz_attempt(
+                latest_attempt["id"],
+                {},
+                bool(latest_attempt.get("consent_given")),
+                status="auto_submitted",
+            )
+            return redirect_to("take_quiz", quizId=quiz["id"], submitted=1, attemptId=expired_attempt_id)
+
+        access_allowed, access_message = quiz_access_state(quiz, user["id"], now=current_time)
+        if submitted and attempt:
+            access_allowed = True
+            access_message = None
+
+        if request.method == "GET" and access_allowed and not submitted:
+            active_attempt_id = ensure_quiz_attempt_in_progress(quiz["id"], user["id"], False)
+            active_attempt = get_attempt(active_attempt_id)
+            countdown_seconds = remaining_attempt_seconds(quiz, active_attempt, current_time)
+            if countdown_seconds is not None and countdown_seconds <= 0:
+                expired_attempt_id = finalize_quiz_attempt(
+                    active_attempt_id,
+                    {},
+                    bool((active_attempt or {}).get("consent_given")),
+                    status="auto_submitted",
+                )
+                return redirect_to("take_quiz", quizId=quiz["id"], submitted=1, attemptId=expired_attempt_id)
 
         detection_available, detection_message = get_detection_runtime_status()
 
@@ -2041,7 +2809,7 @@ def create_app() -> Flask:
             "take_quiz.html",
             quiz=quiz,
             attempt=attempt,
-            submitted=submitted and access_allowed,
+            submitted=submitted and bool(attempt),
             access_allowed=access_allowed,
             access_message=access_message,
             format_schedule=format_schedule,
@@ -2049,14 +2817,39 @@ def create_app() -> Flask:
             realtime_enabled=bool(socketio),
             current_user_name=(user or {}).get("full_name", "Student"),
             active_attempt_id=active_attempt_id,
+            remaining_attempt_seconds=countdown_seconds,
             detection_available=detection_available,
             detection_message=detection_message,
+            submission_error=submission_error,
+            submitted_answers=submitted_answers,
         )
 
     @app.route("/UserManagement")
     @role_required("admin")
     def user_management():
-        users = get_users()
+        current_user = current_session_user() or {}
+        message = request.args.get("message", "").strip()
+        error = request.args.get("error", "").strip()
+        relationship_counts = user_record_counts()
+        users = []
+        for user in get_users():
+            counts = relationship_counts.get(user["id"], {"owned_quizzes": 0, "quiz_attempts": 0})
+            can_delete = (
+                user["id"] != current_user.get("id")
+                and counts.get("owned_quizzes", 0) == 0
+                and counts.get("quiz_attempts", 0) == 0
+            )
+            users.append(
+                {
+                    **user,
+                    "avatar_url": _normalize_avatar_url(user.get("avatar_url")),
+                    "owned_quizzes": counts.get("owned_quizzes", 0),
+                    "quiz_attempts": counts.get("quiz_attempts", 0),
+                    "can_delete": can_delete,
+                    "is_current_user": user["id"] == current_user.get("id"),
+                }
+            )
+
         student_count = sum(1 for user in users if user["role"] == "user")
         instructor_count = sum(1 for user in users if user["role"] == "admin")
         return render_template(
@@ -2065,7 +2858,67 @@ def create_app() -> Flask:
             total_users=len(users),
             student_count=student_count,
             instructor_count=instructor_count,
+            message=message,
+            error=error,
         )
+
+    @app.route("/UserManagement/Save", methods=["POST"])
+    @role_required("admin")
+    def save_user_management_user():
+        current_user = current_session_user() or {}
+        user_id = request.form.get("user_id", "").strip()
+        full_name = request.form.get("full_name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        role = request.form.get("role", "").strip().lower()
+        password = "" if user_id else request.form.get("password", "")
+        section_name = request.form.get("section_name", "").strip()
+
+        if not full_name:
+            return redirect_to("user_management", error="Full name is required.")
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            return redirect_to("user_management", error="Enter a valid email address.")
+        if role not in {"admin", "user"}:
+            return redirect_to("user_management", error="Choose a valid role.")
+        if not user_id and len(password) < 8:
+            return redirect_to("user_management", error="New users need a password with at least 8 characters.")
+        if user_id and current_user.get("id") == user_id and role != "admin":
+            return redirect_to("user_management", error="You cannot remove your own instructor access while signed in.")
+
+        try:
+            if user_id:
+                update_user(user_id, email, full_name, role, None, section_name=section_name)
+                message = "User updated successfully."
+            else:
+                create_user(email, full_name, role, password, section_name=section_name)
+                message = "User created successfully."
+        except ValueError as exc:
+            return redirect_to("user_management", error=str(exc))
+        except sqlite3.IntegrityError:
+            return redirect_to("user_management", error="This email is already in use.")
+
+        return redirect_to("user_management", message=message)
+
+    @app.route("/UserManagement/Delete", methods=["POST"])
+    @role_required("admin")
+    def delete_user_management_user():
+        current_user = current_session_user() or {}
+        user_id = request.form.get("user_id", "").strip()
+        user = get_user_by_id(user_id)
+        if not user:
+            return redirect_to("user_management", error="User not found.")
+        if user_id == current_user.get("id"):
+            return redirect_to("user_management", error="You cannot delete the account you are currently using.")
+
+        counts = user_record_counts().get(user_id, {"owned_quizzes": 0, "quiz_attempts": 0})
+        if counts.get("owned_quizzes", 0) or counts.get("quiz_attempts", 0):
+            return redirect_to(
+                "user_management",
+                error="This user cannot be deleted because they still own quizzes or have quiz attempt records.",
+            )
+
+        if delete_user_by_id(user_id):
+            return redirect_to("user_management", message="User deleted successfully.")
+        return redirect_to("user_management", error="User could not be deleted.")
 
     if socketio:
         def room_name(quiz_id: str) -> str:
@@ -2074,9 +2927,34 @@ def create_app() -> Flask:
         def room_participants(quiz_id: str) -> dict[str, dict]:
             return _monitor_rooms.setdefault(room_name(quiz_id), {})
 
+        def validate_monitor_room_access(quiz_id: str, role: str, user: dict | None, attempt_id: str = "") -> tuple[bool, str, dict | None]:
+            quiz = get_quiz(quiz_id)
+            if not quiz:
+                return False, "Quiz not found.", None
+            if not quiz.get("monitoring_enabled"):
+                return False, "Live monitoring is not enabled for this quiz.", None
+            if role == "admin":
+                return True, "", None
+            if role != "user" or not user:
+                return False, "Unauthorized realtime connection.", None
+            if not attempt_id:
+                return False, "Missing active quiz attempt.", None
+
+            attempt = get_attempt(attempt_id)
+            valid_attempt = bool(
+                attempt
+                and attempt.get("quiz_id") == quiz_id
+                and attempt.get("student_id") == user.get("id")
+                and attempt.get("status") == "in_progress"
+            )
+            if not valid_attempt:
+                return False, "You do not have an active quiz session for this room.", None
+            return True, "", attempt
+
         def participant_payload(participant: dict) -> dict:
             return {
                 "sid": participant.get("sid", ""),
+                "quiz_id": participant.get("quiz_id", ""),
                 "role": participant.get("role", ""),
                 "user_id": participant.get("user_id", ""),
                 "attempt_id": participant.get("attempt_id", ""),
@@ -2085,28 +2963,6 @@ def create_app() -> Flask:
                 "camera_on": bool(participant.get("camera_on", False)),
             }
 
-        def emit_monitor_student_snapshot(quiz_id: str, target_sid: str | None = None) -> None:
-            participants = room_participants(quiz_id)
-            student_items = []
-            for item in participants.values():
-                if item.get("role") != "user":
-                    continue
-                student_items.append(
-                    {
-                        "sid": item.get("sid", ""),
-                        "attempt_id": item.get("attempt_id", ""),
-                        "user_id": item.get("user_id", ""),
-                        "display_name": item.get("display_name", "Student"),
-                        "email": item.get("email", ""),
-                        "camera_on": bool(item.get("camera_on", False)),
-                    }
-                )
-            payload = {"quizId": quiz_id, "students": student_items}
-            if target_sid:
-                emit("monitor_students_snapshot", payload, to=target_sid)
-                return
-            emit("monitor_students_snapshot", payload, room=room_name(quiz_id))
-
         @socketio.on("join_monitor_room")
         def on_join_monitor_room(data):
             quiz_id = str((data or {}).get("quizId", "")).strip()
@@ -2114,9 +2970,21 @@ def create_app() -> Flask:
                 emit("monitor_error", {"message": "Missing quiz ID."})
                 return
 
-            role = session.get("role")
+            current_user = current_session_user()
+            role = (current_user or {}).get("role", "")
             if role not in {"admin", "user"}:
                 emit("monitor_error", {"message": "Unauthorized realtime connection."})
+                return
+
+            raw_attempt_id = str((data or {}).get("attemptId", "")).strip()
+            access_allowed, access_message, active_attempt = validate_monitor_room_access(
+                quiz_id,
+                role,
+                current_user,
+                raw_attempt_id,
+            )
+            if not access_allowed:
+                emit("monitor_error", {"message": access_message})
                 return
 
             room = room_name(quiz_id)
@@ -2124,9 +2992,8 @@ def create_app() -> Flask:
 
             participants = room_participants(quiz_id)
             sid = request.sid
-            current_user = get_user_by_id(session.get("user_id", "")) if session.get("user_id") else None
             display_name = ((current_user or {}).get("full_name") or role.title()).strip()
-            attempt_id = str((data or {}).get("attemptId", "")).strip()
+            attempt_id = active_attempt.get("id", "") if active_attempt else ""
             user_id = (current_user or {}).get("id", "")
             participants[sid] = {
                 "sid": sid,
@@ -2136,7 +3003,7 @@ def create_app() -> Flask:
                 "attempt_id": attempt_id,
                 "display_name": display_name,
                 "email": (current_user or {}).get("email", ""),
-                "camera_on": bool((data or {}).get("cameraOn", False) and role == "user"),
+                "camera_on": bool((data or {}).get("cameraOn", False) and role == "user" and active_attempt),
             }
 
             emit(
@@ -2147,9 +3014,7 @@ def create_app() -> Flask:
                 },
                 to=sid,
             )
-            emit_monitor_student_snapshot(quiz_id, target_sid=sid)
             emit("participant_joined", participant_payload(participants[sid]), room=room, include_self=False)
-            emit_monitor_student_snapshot(quiz_id)
 
         @socketio.on("set_camera_status")
         def on_set_camera_status(data):
@@ -2168,7 +3033,6 @@ def create_app() -> Flask:
 
             participant["camera_on"] = camera_on
             emit("participant_updated", participant_payload(participant), room=room_name(quiz_id))
-            emit_monitor_student_snapshot(quiz_id)
 
         @socketio.on("webrtc_offer")
         def on_webrtc_offer(data):
@@ -2181,6 +3045,9 @@ def create_app() -> Flask:
             if request.sid not in participants or target_sid not in participants:
                 return
             sender = participants.get(request.sid, {})
+            target = participants.get(target_sid, {})
+            if sender.get("role") != "admin" or target.get("role") != "user":
+                return
             emit(
                 "webrtc_offer",
                 {
@@ -2202,6 +3069,10 @@ def create_app() -> Flask:
             participants = room_participants(quiz_id)
             if request.sid not in participants or target_sid not in participants:
                 return
+            sender = participants.get(request.sid, {})
+            target = participants.get(target_sid, {})
+            if sender.get("role") != "user" or target.get("role") != "admin":
+                return
             emit(
                 "webrtc_answer",
                 {
@@ -2221,6 +3092,10 @@ def create_app() -> Flask:
                 return
             participants = room_participants(quiz_id)
             if request.sid not in participants or target_sid not in participants:
+                return
+            sender = participants.get(request.sid, {})
+            target = participants.get(target_sid, {})
+            if {sender.get("role"), target.get("role")} != {"admin", "user"}:
                 return
             emit(
                 "webrtc_ice_candidate",
@@ -2243,7 +3118,7 @@ def create_app() -> Flask:
             if not participant or participant.get("role") != "user":
                 return
 
-            attempt_id = str((data or {}).get("attemptId", "")).strip() or participant.get("attempt_id", "")
+            attempt_id = str(participant.get("attempt_id", "")).strip() or str((data or {}).get("attemptId", "")).strip()
             message = str((data or {}).get("message", "")).strip()
             code = str((data or {}).get("code", "")).strip().lower() or "camera_status"
             level = str((data or {}).get("level", "")).strip().lower() or "medium"
@@ -2265,7 +3140,11 @@ def create_app() -> Flask:
             emit("monitor_status_report", payload, room=room_name(quiz_id))
 
             attempt = get_attempt(attempt_id) if attempt_id else None
-            valid_attempt = bool(attempt and attempt.get("quiz_id") == quiz_id)
+            valid_attempt = bool(
+                attempt
+                and attempt.get("quiz_id") == quiz_id
+                and attempt.get("student_id") == participant.get("user_id")
+            )
             if valid_attempt and _should_log_detection_event(attempt_id, f"monitor_status:{code}", cooldown_seconds=15):
                 created_log = create_activity_log(
                     quiz_id=quiz_id,
@@ -2289,14 +3168,10 @@ def create_app() -> Flask:
             for room, participants in list(_monitor_rooms.items()):
                 if sid not in participants:
                     continue
-                participants.pop(sid)
+                participant = participants.pop(sid)
                 leave_room(room)
-                emit("participant_left", {"sid": sid}, room=room)
-                quiz_id = room.split(":", 1)[1] if ":" in room else ""
-                if quiz_id:
-                    emit_monitor_student_snapshot(quiz_id)
+                emit("participant_left", {"sid": sid, "quizId": participant.get("quiz_id", "")}, room=room)
                 if not participants:
                     _monitor_rooms.pop(room, None)
-                break
 
     return app

@@ -1,5 +1,20 @@
 {
   "css.lint.unknownAtRules": "ignore",
   "scss.lint.unknownAtRules": "ignore",
-  "less.lint.unknownAtRules": "ignore"
+  "less.lint.unknownAtRules": "ignore",
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv311\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.defaultProfile.windows": "PowerShell (venv311)",
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (venv311)": {
+      "source": "PowerShell",
+      "args": [
+        "-NoExit",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& '${workspaceFolder}\\.venv311\\Scripts\\Activate.ps1'"
+      ]
+    }
+  }
 }
