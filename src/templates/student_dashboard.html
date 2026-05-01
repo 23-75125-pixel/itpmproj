@@ -51,17 +51,6 @@
             <span>Best Score</span>
         </div>
     </article>
-    <article class="stat-card">
-        <div class="stat-icon blue" style="display: flex; align-items: center; justify-content: center;">
-            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="20 6 9 17 4 12"></polyline>
-            </svg>
-        </div>
-        <div>
-            <strong>{{ summary.passed_count }}</strong>
-            <span>Passed (≥75%)</span>
-        </div>
-    </article>
 </section>
 
 <section class="two-column student-progress-grid">
@@ -114,33 +103,32 @@
 </section>
 
 <section class="student-list-section student-list-section-available">
-    <h2>Available Quizzes</h2>
+    <h2>Active Quizzes</h2>
+    <p class="helper student-availability-helper">
+        Showing only quizzes that are active right now and still available for you to take as of {{ availability_checked_at }}.
+    </p>
     <div class="stack-list">
-        {% for quiz in open_quiz_list %}
-        <div class="list-card student-available-card">
+        {% for item in available_quiz_cards %}
+        {% set quiz = item.quiz %}
+        <div class="list-card student-available-card student-available-card-detailed">
             <div>
                 <strong>{{ quiz.title }}</strong>
                 <p>{{ quiz.subject }} &middot; {{ quiz.time_limit_minutes }} min &middot; {{ quiz.questions|length }} questions</p>
+                <div class="student-available-meta">
+                    <span class="status-pill open">Open now</span>
+                    <span>Opens: {{ item.window.opens_at }}</span>
+                    <span>Closes: {{ item.window.closes_at }}</span>
+                    {% if quiz.assigned_section %}<span>Section: {{ quiz.assigned_section }}</span>{% endif %}
+                </div>
+                <p class="student-available-summary">{{ item.window.summary }}</p>
             </div>
-            <a class="button primary" href="{{ url_for('take_quiz', quizId=quiz.id) }}">Take</a>
+            <a class="button primary" href="{{ url_for('take_quiz', quizId=quiz.id) }}">{{ 'Continue Quiz' if item.is_in_progress else 'Take Quiz' }}</a>
         </div>
-        {% endfor %}
-    </div>
-</section>
-
-<section class="student-list-section student-list-section-history">
-    <h2>Quiz History</h2>
-    <div class="stack-list">
-        {% for item in summary.history %}
-        <div class="list-card student-history-card">
+        {% else %}
+        <div class="list-card student-available-card student-available-empty">
             <div>
-                <strong>{{ item.title }}</strong>
-                <p>{{ item.subject }} &middot; {{ item.date }}</p>
-            </div>
-            <div class="student-history-score">
-                <strong class="{% if item.percentage >= 75 %}score-good{% elif item.percentage >= 50 %}score-mid{% else %}score-low{% endif %}">{{ item.percentage }}%</strong>
-                <span>{{ item.score_text }}</span>
-                <span class="status-pill published">{{ item.status }}</span>
+                <strong>No quizzes are open right now</strong>
+                <p>Only quizzes that are currently open and still available for you to take will appear here.</p>
             </div>
         </div>
         {% endfor %}

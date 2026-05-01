@@ -5,33 +5,70 @@
     <div>
         <p class="eyebrow">Instructor Workspace</p>
         <h1>My Quizzes</h1>
-        <p class="subhead">{{ quizzes|length }} total quizzes</p>
+        <p class="subhead">
+            {% if status_filter == 'all' and not search %}
+            {{ total_quizzes_count }} total quizzes
+            {% else %}
+            {{ filtered_quiz_count }} matching quiz{% if filtered_quiz_count != 1 %}zes{% endif %} out of {{ total_quizzes_count }}
+            {% endif %}
+        </p>
     </div>
     <a class="button primary" href="{{ url_for('create_quiz') }}">Create New Quiz</a>
 </section>
 
 {% if message %}
 <section class="manager-banner">
-    <div class="schedule-message success-message">{{ message }}</div>
+    <div class="schedule-message success-message" data-swal-message data-swal-icon="success" data-swal-title="Success">{{ message }}</div>
 </section>
 {% endif %}
 
 <form class="quiz-toolbar" method="get">
-    <div class="search-shell">
-        <span class="search-icon">⌕</span>
-        <input type="text" name="q" value="{{ search or '' }}" placeholder="Search quizzes...">
+    <div class="quiz-toolbar-fields">
+        <label class="quiz-toolbar-field">
+            <span>Search</span>
+            <div class="search-shell">
+                <span class="search-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="7"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </span>
+                <input type="text" name="q" value="{{ search or '' }}" placeholder="Search by title, subject, or quiz code">
+            </div>
+        </label>
+        <label class="quiz-toolbar-field">
+            <span>Status</span>
+            <select name="status">
+                <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All statuses</option>
+                <option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>Draft</option>
+                <option value="published" {% if status_filter == 'published' %}selected{% endif %}>Published</option>
+                <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>Closed</option>
+            </select>
+        </label>
     </div>
-    <div class="filter-pills">
-        <button class="filter-pill {% if status_filter == 'all' %}active{% endif %}" name="status" value="all" type="submit">All</button>
-        <button class="filter-pill {% if status_filter == 'draft' %}active{% endif %}" name="status" value="draft" type="submit">Draft</button>
-        <button class="filter-pill {% if status_filter == 'published' %}active{% endif %}" name="status" value="published" type="submit">Published</button>
-        <button class="filter-pill {% if status_filter == 'closed' %}active{% endif %}" name="status" value="closed" type="submit">Closed</button>
+    <div class="quiz-toolbar-actions">
+        <button class="button primary" type="submit" id="quiz-filter-submit">Apply Filters</button>
+        {% if has_active_filters %}
+        <a class="button secondary" href="{{ url_for('quiz_manager') }}">Clear All</a>
+        {% endif %}
     </div>
 </form>
 
+<section class="quiz-manager-danger">
+    <div class="quiz-manager-danger-copy">
+        <p class="eyebrow">Danger Zone</p>
+        <h2>Clear My Created Quizzes</h2>
+        <p class="helper">Delete every quiz you created, including questions, attempts, student responses, and monitoring logs. This cannot be undone.</p>
+    </div>
+    <form class="quiz-manager-danger-actions" method="post" action="{{ url_for('quiz_action') }}" data-swal-confirm data-swal-title="Delete all your quizzes?" data-swal-text="This will remove every quiz you created, along with all attempts, responses, and monitoring logs. This cannot be undone." data-swal-icon="warning" data-swal-confirm-text="Yes, clear my quizzes" data-swal-cancel-text="Cancel">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <button class="button quiz-manager-danger-button" type="submit" name="action" value="clear_all_created" {% if not total_quizzes_count %}disabled{% endif %}>Clear My Quizzes</button>
+    </form>
+</section>
+
 <section class="quiz-grid">
     {% for quiz in quizzes %}
-    {% set quiz_attempt_count = attempts | selectattr('quiz_id', 'equalto', quiz.id) | list | length %}
+    {% set quiz_attempt_count = quiz_attempt_totals.get(quiz.id, 0) %}
     {% set primary_href = url_for('create_quiz', quizId=quiz.id) if quiz.status == 'draft' else url_for('quiz_results', quizId=quiz.id) %}
     <article class="recent-quiz-card manager-card">
         <div class="recent-top">
@@ -49,28 +86,33 @@
                         {% if quiz.status == 'draft' %}
                         <a href="{{ url_for('create_quiz', quizId=quiz.id) }}">Edit Quiz</a>
                         <a href="{{ url_for('create_quiz', quizId=quiz.id) }}">Continue Draft</a>
-                        <form method="post" action="{{ url_for('quiz_action') }}">
+                        <form method="post" action="{{ url_for('quiz_action') }}" data-swal-confirm data-swal-title="Delete this draft quiz?" data-swal-text="This draft and its questions will be permanently removed." data-swal-icon="warning" data-swal-confirm-text="Yes, delete draft" data-swal-cancel-text="Cancel">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">
                             <button type="submit" name="action" value="delete" class="danger">Delete Draft</button>
                         </form>
                         {% elif quiz.status == 'published' %}
                         <a href="{{ url_for('quiz_results', quizId=quiz.id) }}">View Results</a>
                         <button type="button" class="copy-code-button" data-quiz-code="{{ quiz.quiz_code }}">Copy Code</button>
-                        <form method="post" action="{{ url_for('quiz_action') }}">
+                        <form method="post" action="{{ url_for('quiz_action') }}" data-swal-confirm data-swal-title="Close this quiz?" data-swal-text="Students will no longer be able to access this quiz after it is closed." data-swal-icon="warning" data-swal-confirm-text="Yes, close quiz" data-swal-cancel-text="Cancel">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">
                             <button type="submit" name="action" value="close">Close Quiz</button>
                         </form>
-                        <form method="post" action="{{ url_for('quiz_action') }}">
+                        <form method="post" action="{{ url_for('quiz_action') }}" data-swal-confirm data-swal-title="Delete this quiz?" data-swal-text="This will permanently remove the quiz, attempts, student responses, and monitoring logs." data-swal-icon="warning" data-swal-confirm-text="Yes, delete quiz" data-swal-cancel-text="Cancel">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">
                             <button type="submit" name="action" value="delete" class="danger">Delete</button>
                         </form>
                         {% else %}
                         <a href="{{ url_for('quiz_results', quizId=quiz.id) }}">View Results</a>
-                        <form method="post" action="{{ url_for('quiz_action') }}">
+                        <form method="post" action="{{ url_for('quiz_action') }}" data-swal-confirm data-swal-title="Reopen this quiz?" data-swal-text="The quiz will be returned to draft mode so you can edit it again." data-swal-icon="question" data-swal-confirm-text="Yes, reopen quiz" data-swal-cancel-text="Cancel">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">
                             <button type="submit" name="action" value="reopen">Reopen &amp; Edit</button>
                         </form>
-                        <form method="post" action="{{ url_for('quiz_action') }}">
+                        <form method="post" action="{{ url_for('quiz_action') }}" data-swal-confirm data-swal-title="Delete this quiz?" data-swal-text="This will permanently remove the quiz, attempts, student responses, and monitoring logs." data-swal-icon="warning" data-swal-confirm-text="Yes, delete quiz" data-swal-cancel-text="Cancel">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="quiz_id" value="{{ quiz.id }}">
                             <button type="submit" name="action" value="delete" class="danger">Delete</button>
                         </form>
@@ -92,10 +134,10 @@
             <a class="button secondary manager-card-button" href="{{ primary_href }}">Edit Quiz</a>
             <p class="manager-card-note">Draft quizzes can still be updated before publishing.</p>
             {% elif quiz.status == 'published' %}
-            <a class="button primary manager-card-button" href="{{ primary_href }}">View Result</a>
+            <a class="button primary manager-card-button" href="{{ primary_href }}">View Results</a>
             <p class="manager-card-note">Published quizzes show who already took the exam.</p>
             {% else %}
-            <a class="button primary manager-card-button" href="{{ primary_href }}">View Result</a>
+            <a class="button primary manager-card-button" href="{{ primary_href }}">View Results</a>
             <p class="manager-card-note">Closed quizzes are locked, but results stay available for review.</p>
             {% endif %}
         </div>
@@ -103,24 +145,68 @@
     {% else %}
     <article class="panel empty-state-panel">
         <h3>No quizzes found</h3>
-       
+        <p class="helper">Try another search term or switch the status filter to see more quizzes.</p>
     </article>
     {% endfor %}
 </section>
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
+    const menus = Array.from(document.querySelectorAll(".quiz-card-menu"));
+    const filterForm = document.querySelector(".quiz-toolbar");
+    const filterSubmitButton = document.getElementById("quiz-filter-submit");
+    menus.forEach((menu) => {
+        menu.addEventListener("toggle", () => {
+            if (!menu.open) {
+                return;
+            }
+            menus.forEach((otherMenu) => {
+                if (otherMenu !== menu) {
+                    otherMenu.removeAttribute("open");
+                }
+            });
+        });
+    });
+
+    document.addEventListener("click", (event) => {
+        menus.forEach((menu) => {
+            if (menu.open && !menu.contains(event.target)) {
+                menu.removeAttribute("open");
+            }
+        });
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") {
+            return;
+        }
+        menus.forEach((menu) => menu.removeAttribute("open"));
+    });
+
+    if (filterForm && filterSubmitButton) {
+        filterForm.addEventListener("submit", () => {
+            filterSubmitButton.disabled = true;
+            filterSubmitButton.textContent = "Applying...";
+        });
+    }
+
     document.querySelectorAll(".copy-code-button").forEach((button) => {
         button.addEventListener("click", async () => {
             const code = button.dataset.quizCode || "";
             try {
                 await navigator.clipboard.writeText(code);
+                await window.semcdsSwal.toast({ title: "Quiz code copied to clipboard." });
                 button.textContent = "Copied!";
                 setTimeout(() => {
                     button.textContent = "Copy Code";
                 }, 1400);
             } catch (error) {
-                button.textContent = code;
+                await window.semcdsSwal.fire({
+                    title: "Copy unavailable",
+                    html: window.semcdsSwal.toHtmlBlock(`Copying is not available in this browser.\n\nQuiz code: ${code}`),
+                    icon: "info",
+                    confirmButtonText: "OK",
+                });
             }
         });
     });

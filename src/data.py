@@ -3,14 +3,17 @@ from __future__ import annotations
 import calendar
 import json
 import os
+import re
 import sqlite3
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+
+from .env_loader import load_env_file
 
 try:
     from werkzeug.security import check_password_hash, generate_password_hash
@@ -23,6 +26,8 @@ except Exception:  # pragma: no cover - Werkzeug is expected with Flask, but kee
         raise RuntimeError("Werkzeug security helpers are not available.")
 
 
+load_env_file()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("DB_PATH", str(BASE_DIR / "database" / "semcds.db")))
 SCHEMA_PATH = BASE_DIR / "database" / "schema.sql"
@@ -33,6 +38,9 @@ FEATURES = [
     "Instructor dashboards with result analytics and flag review",
     "Student-friendly quiz flow with timer, consent, and instant feedback",
 ]
+
+USER_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+VALID_USER_ROLES = {"admin", "user"}
 
 DEFAULT_USERS = [
     {
@@ -152,6 +160,14 @@ def _now_stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _normalize_section_name(section_name: str | None) -> str:
+    return " ".join(str(section_name or "").split()).casefold()
+
+
 def _text_to_datetime(raw_value: str | None) -> datetime | None:
     if not raw_value:
         return None
@@ -200,6 +216,14 @@ def init_database() -> None:
     with get_connection() as connection:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         connection.executescript(schema)
+        user_columns = [row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()]
+        if "section_name" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN section_name VARCHAR(255) NOT NULL DEFAULT ''")
+        if "avatar_url" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
+        quiz_columns = [row[1] for row in connection.execute("PRAGMA table_info(quizzes)").fetchall()]
+        if "assigned_section" not in quiz_columns:
+            connection.execute("ALTER TABLE quizzes ADD COLUMN assigned_section VARCHAR(255) NOT NULL DEFAULT ''")
         existing_columns = [row[1] for row in connection.execute("PRAGMA table_info(quiz_attempts)").fetchall()]
         if "quiz_code" not in existing_columns:
             connection.execute("ALTER TABLE quiz_attempts ADD COLUMN quiz_code VARCHAR(50) NOT NULL DEFAULT ''")
@@ -323,7 +347,7 @@ def get_user(role: str) -> dict | None:
 
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT id, email, full_name, role, password_hash, created_at FROM users WHERE role = ? ORDER BY created_at LIMIT 1",
+            "SELECT id, email, full_name, role, section_name, avatar_url, password_hash, created_at FROM users WHERE role = ? ORDER BY created_at LIMIT 1",
             (role,),
         ).fetchone()
     return dict(row) if row else None
@@ -335,9 +359,49 @@ def get_users() -> list[dict]:
 
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT id, email, full_name, role, password_hash, created_at FROM users ORDER BY datetime(created_at), rowid"
+            "SELECT id, email, full_name, role, section_name, avatar_url, password_hash, created_at FROM users ORDER BY datetime(created_at), rowid"
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def user_record_counts() -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+
+    def ensure_bucket(user_id: str) -> dict[str, int]:
+        return counts.setdefault(user_id, {"owned_quizzes": 0, "quiz_attempts": 0})
+
+    if using_supabase():
+        for quiz in _sb_select("quizzes"):
+            creator_id = str(quiz.get("creator_id", "")).strip()
+            if creator_id:
+                ensure_bucket(creator_id)["owned_quizzes"] += 1
+        for attempt in _sb_select("quiz_attempts"):
+            student_id = str(attempt.get("student_id", "")).strip()
+            if student_id:
+                ensure_bucket(student_id)["quiz_attempts"] += 1
+        return counts
+
+    with get_connection() as connection:
+        owned_rows = connection.execute(
+            """
+            SELECT creator_id AS user_id, COUNT(*) AS total
+            FROM quizzes
+            GROUP BY creator_id
+            """
+        ).fetchall()
+        attempt_rows = connection.execute(
+            """
+            SELECT student_id AS user_id, COUNT(*) AS total
+            FROM quiz_attempts
+            GROUP BY student_id
+            """
+        ).fetchall()
+
+    for row in owned_rows:
+        ensure_bucket(str(row["user_id"]))["owned_quizzes"] = int(row["total"])
+    for row in attempt_rows:
+        ensure_bucket(str(row["user_id"]))["quiz_attempts"] = int(row["total"])
+    return counts
 
 
 def get_user_by_id(user_id: str) -> dict | None:
@@ -347,7 +411,7 @@ def get_user_by_id(user_id: str) -> dict | None:
 
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT id, email, full_name, role, password_hash, created_at FROM users WHERE id = ?",
+            "SELECT id, email, full_name, role, section_name, avatar_url, password_hash, created_at FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -355,21 +419,31 @@ def get_user_by_id(user_id: str) -> dict | None:
 
 def get_user_by_email(email: str) -> dict | None:
     if using_supabase():
-        normalized_email = email.strip().lower()
+        normalized_email = _normalize_email(email)
         rows = [row for row in _sb_select("users") if row.get("email", "").strip().lower() == normalized_email]
         return rows[0] if rows else None
 
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT id, email, full_name, role, password_hash, created_at FROM users WHERE lower(email) = ?",
-            (email.strip().lower(),),
+            "SELECT id, email, full_name, role, section_name, avatar_url, password_hash, created_at FROM users WHERE lower(email) = ?",
+            (_normalize_email(email),),
         ).fetchone()
     return dict(row) if row else None
 
 
-def create_user(email: str, full_name: str, role: str, password: str) -> dict:
-    normalized_email = email.strip().lower()
+def create_user(email: str, full_name: str, role: str, password: str, section_name: str = "") -> dict:
+    normalized_email = _normalize_email(email)
+    role = str(role).strip().lower()
     full_name = full_name.strip() or normalized_email
+    clean_section_name = " ".join(str(section_name or "").split()) if role == "user" else ""
+    if not normalized_email or not USER_EMAIL_PATTERN.match(normalized_email):
+        raise ValueError("Enter a valid email address.")
+    if role not in VALID_USER_ROLES:
+        raise ValueError("Choose a valid role.")
+    if not password:
+        raise ValueError("A password is required.")
+    if get_user_by_email(normalized_email):
+        raise ValueError("A user with this email already exists.")
     created_at = _now_stamp()
     if using_supabase():
         user_id = next_id("user")
@@ -378,6 +452,7 @@ def create_user(email: str, full_name: str, role: str, password: str) -> dict:
             "email": normalized_email,
             "full_name": full_name,
             "role": role,
+            "section_name": clean_section_name,
             "password_hash": generate_password_hash(password),
             "created_at": created_at,
         }
@@ -387,18 +462,78 @@ def create_user(email: str, full_name: str, role: str, password: str) -> dict:
     with get_connection() as connection:
         user_id = next_id("user")
         connection.execute(
-            "INSERT INTO users (id, email, full_name, role, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (id, email, full_name, role, section_name, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 user_id,
                 normalized_email,
                 full_name,
                 role,
+                clean_section_name,
                 generate_password_hash(password),
                 created_at,
             ),
         )
         row = connection.execute(
-            "SELECT id, email, full_name, role, password_hash, created_at FROM users WHERE id = ?",
+            "SELECT id, email, full_name, role, section_name, avatar_url, password_hash, created_at FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def update_user(
+    user_id: str,
+    email: str,
+    full_name: str,
+    role: str,
+    password: str | None = None,
+    section_name: str = "",
+) -> dict:
+    target_user = get_user_by_id(user_id)
+    if not target_user:
+        raise ValueError("User not found.")
+
+    normalized_email = _normalize_email(email)
+    normalized_role = str(role).strip().lower()
+    clean_name = full_name.strip()
+    clean_section_name = " ".join(str(section_name or "").split()) if normalized_role == "user" else ""
+    if not normalized_email or not USER_EMAIL_PATTERN.match(normalized_email):
+        raise ValueError("Enter a valid email address.")
+    if not clean_name:
+        raise ValueError("Full name is required.")
+    if normalized_role not in VALID_USER_ROLES:
+        raise ValueError("Choose a valid role.")
+
+    existing_email_user = get_user_by_email(normalized_email)
+    if existing_email_user and existing_email_user["id"] != user_id:
+        raise ValueError("A user with this email already exists.")
+
+    payload = {
+        "email": normalized_email,
+        "full_name": clean_name,
+        "role": normalized_role,
+        "section_name": clean_section_name,
+    }
+    if password:
+        payload["password_hash"] = generate_password_hash(password)
+
+    if using_supabase():
+        _sb_update("users", payload, {"id": user_id})
+        updated = get_user_by_id(user_id)
+        return updated or {}
+
+    with get_connection() as connection:
+        assignments = ["email = ?", "full_name = ?", "role = ?", "section_name = ?"]
+        values: list[str] = [normalized_email, clean_name, normalized_role, clean_section_name]
+        if password:
+            assignments.append("password_hash = ?")
+            values.append(generate_password_hash(password))
+        values.append(user_id)
+        connection.execute(
+            f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        row = connection.execute(
+            "SELECT id, email, full_name, role, section_name, avatar_url, password_hash, created_at FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
     return dict(row) if row else {}
@@ -424,14 +559,52 @@ def set_user_password(user_id: str, password: str) -> bool:
         return result.rowcount > 0
 
 
+def set_user_avatar_url(user_id: str, avatar_url: str) -> bool:
+    if not user_id:
+        return False
+
+    clean_avatar_url = str(avatar_url or "").strip()
+    if using_supabase():
+        try:
+            existing = _sb_select("users", {"id": user_id})
+            if not existing:
+                return False
+            _sb_update("users", {"avatar_url": clean_avatar_url}, {"id": user_id})
+            return True
+        except RuntimeError:
+            return False
+
+    with get_connection() as connection:
+        result = connection.execute(
+            "UPDATE users SET avatar_url = ? WHERE id = ?",
+            (clean_avatar_url, user_id),
+        )
+        return result.rowcount > 0
+
+
 def delete_user_by_email(email: str) -> None:
-    normalized_email = email.strip().lower()
+    normalized_email = _normalize_email(email)
     if using_supabase():
         _sb_delete("users", {"email": normalized_email})
         return
 
     with get_connection() as connection:
         connection.execute("DELETE FROM users WHERE lower(email) = ?", (normalized_email,))
+
+
+def delete_user_by_id(user_id: str) -> bool:
+    if not user_id:
+        return False
+    if using_supabase():
+        existing = _sb_select("users", {"id": user_id})
+        if not existing:
+            return False
+        _sb_delete("users", {"id": user_id})
+        return True
+
+    with get_connection() as connection:
+        result = connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        return result.rowcount > 0
 
 
 def hydrate_quiz(row: sqlite3.Row | dict | None, connection: sqlite3.Connection | None = None) -> dict | None:
@@ -506,6 +679,7 @@ def hydrate_quiz(row: sqlite3.Row | dict | None, connection: sqlite3.Connection 
 
 
 def get_quiz(quiz_id: str) -> dict | None:
+    sync_quiz_statuses()
     if using_supabase():
         rows = _sb_select("quizzes", {"id": quiz_id})
         return hydrate_quiz(rows[0]) if rows else None
@@ -516,6 +690,7 @@ def get_quiz(quiz_id: str) -> dict | None:
 
 
 def get_quiz_by_code(code: str) -> dict | None:
+    sync_quiz_statuses()
     if using_supabase():
         normalized_code = code.strip().upper()
         rows = [row for row in _sb_select("quizzes") if row.get("quiz_code", "").strip().upper() == normalized_code]
@@ -539,7 +714,27 @@ def get_quiz_attempt_for_student_code(quiz_id: str, student_id: str, quiz_code: 
         return attempt_with_details(row, connection) if row else None
 
 
+def get_quiz_attempt_for_student(quiz_id: str, student_id: str) -> dict | None:
+    if using_supabase():
+        rows = _sort_rows(_sb_select("quiz_attempts", {"quiz_id": quiz_id, "student_id": student_id}), "started_at", reverse=True)
+        return attempt_with_details(rows[0]) if rows else None
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM quiz_attempts
+            WHERE quiz_id = ? AND student_id = ?
+            ORDER BY datetime(started_at) DESC, rowid DESC
+            LIMIT 1
+            """,
+            (quiz_id, student_id),
+        ).fetchone()
+        return attempt_with_details(row, connection) if row else None
+
+
 def get_quizzes() -> list[dict]:
+    sync_quiz_statuses()
     if using_supabase():
         rows = _sort_rows(_sb_select("quizzes"), "created_at", reverse=True)
         return [hydrate_quiz(row) for row in rows]
@@ -550,7 +745,7 @@ def get_quizzes() -> list[dict]:
 
 
 def open_quizzes() -> list[dict]:
-    return [quiz for quiz in get_quizzes() if quiz["status"] == "published"]
+    return [quiz for quiz in get_quizzes() if quiz["status"] == "published" and schedule_status(quiz) == "open"]
 
 
 def create_or_update_quiz(
@@ -567,7 +762,11 @@ def create_or_update_quiz(
     scheduled_end: str,
     status: str,
     questions_payload: list[dict],
+    assigned_section: str = "",
 ) -> str:
+    time_limit_minutes = max(0, int(time_limit_minutes or 0))
+    clean_assigned_section = " ".join(str(assigned_section or "").split())
+
     if using_supabase():
         now = _now_stamp()
         existing = _sb_select("quizzes", {"id": quiz_id}) if quiz_id else []
@@ -582,6 +781,7 @@ def create_or_update_quiz(
                     "status": status,
                     "quiz_code": quiz_code,
                     "monitoring_enabled": bool(monitoring_enabled),
+                    "assigned_section": clean_assigned_section,
                     "scheduled_start": scheduled_start or None,
                     "scheduled_end": scheduled_end or None,
                 },
@@ -605,6 +805,7 @@ def create_or_update_quiz(
                     "status": status,
                     "quiz_code": quiz_code,
                     "monitoring_enabled": bool(monitoring_enabled),
+                    "assigned_section": clean_assigned_section,
                     "scheduled_start": scheduled_start or None,
                     "scheduled_end": scheduled_end or None,
                     "created_at": now,
@@ -662,7 +863,7 @@ def create_or_update_quiz(
                 """
                 UPDATE quizzes
                 SET title = ?, description = ?, subject = ?, time_limit_minutes = ?, status = ?,
-                    quiz_code = ?, monitoring_enabled = ?, scheduled_start = ?, scheduled_end = ?
+                    quiz_code = ?, monitoring_enabled = ?, assigned_section = ?, scheduled_start = ?, scheduled_end = ?
                 WHERE id = ?
                 """,
                 (
@@ -673,6 +874,7 @@ def create_or_update_quiz(
                     status,
                     quiz_code,
                     int(monitoring_enabled),
+                    clean_assigned_section,
                     scheduled_start or None,
                     scheduled_end or None,
                     quiz_id,
@@ -692,8 +894,8 @@ def create_or_update_quiz(
                 """
                 INSERT INTO quizzes (
                     id, creator_id, title, description, subject, time_limit_minutes, status,
-                    quiz_code, monitoring_enabled, scheduled_start, scheduled_end, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    quiz_code, monitoring_enabled, assigned_section, scheduled_start, scheduled_end, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     quiz_id,
@@ -705,6 +907,7 @@ def create_or_update_quiz(
                     status,
                     quiz_code,
                     int(monitoring_enabled),
+                    clean_assigned_section,
                     scheduled_start or None,
                     scheduled_end or None,
                     now,
@@ -954,7 +1157,45 @@ def ensure_quiz_attempt_in_progress(quiz_id: str, student_id: str, consent_given
     return attempt_id
 
 
-def finalize_quiz_attempt(attempt_id: str, answers: dict[str, str], consent_given: bool) -> str:
+def attempt_deadline(quiz: dict | None, attempt: dict | None) -> datetime | None:
+    if not quiz or not attempt:
+        return None
+
+    started_at = parse_schedule(attempt.get("started_at"))
+    scheduled_end = parse_schedule(quiz.get("scheduled_end"))
+    time_limit_minutes = max(0, int(quiz.get("time_limit_minutes") or 0))
+    relative_deadline = (
+        started_at + timedelta(minutes=time_limit_minutes)
+        if started_at and time_limit_minutes > 0
+        else None
+    )
+
+    if relative_deadline and scheduled_end:
+        return min(relative_deadline, scheduled_end)
+    return relative_deadline or scheduled_end
+
+
+def remaining_attempt_seconds(quiz: dict | None, attempt: dict | None, now: datetime | None = None) -> int | None:
+    deadline = attempt_deadline(quiz, attempt)
+    if not deadline:
+        return None
+    current_time = now or datetime.now()
+    return max(0, int((deadline - current_time).total_seconds()))
+
+
+def attempt_has_expired(quiz: dict | None, attempt: dict | None, now: datetime | None = None) -> bool:
+    deadline = attempt_deadline(quiz, attempt)
+    if not deadline:
+        return False
+    return (now or datetime.now()) >= deadline
+
+
+def finalize_quiz_attempt(
+    attempt_id: str,
+    answers: dict[str, str],
+    consent_given: bool,
+    status: str = "submitted",
+) -> str:
     attempt = get_attempt(attempt_id)
     if not attempt:
         raise ValueError("Quiz attempt not found.")
@@ -964,6 +1205,10 @@ def finalize_quiz_attempt(attempt_id: str, answers: dict[str, str], consent_give
     quiz = get_quiz(attempt["quiz_id"])
     if not quiz:
         raise ValueError("Quiz not found.")
+
+    final_status = str(status or "submitted").strip().lower()
+    if final_status not in {"submitted", "auto_submitted"}:
+        final_status = "submitted"
 
     submitted_at = _now_stamp()
     score = 0
@@ -995,7 +1240,7 @@ def finalize_quiz_attempt(attempt_id: str, answers: dict[str, str], consent_give
             {
                 "score": score,
                 "percentage": percentage,
-                "status": "submitted",
+                "status": final_status,
                 "submitted_at": submitted_at,
                 "consent_given": bool(consent_given),
             },
@@ -1029,10 +1274,10 @@ def finalize_quiz_attempt(attempt_id: str, answers: dict[str, str], consent_give
         connection.execute(
             """
             UPDATE quiz_attempts
-            SET score = ?, percentage = ?, status = 'submitted', submitted_at = ?, consent_given = ?
+            SET score = ?, percentage = ?, status = ?, submitted_at = ?, consent_given = ?
             WHERE id = ?
             """,
-            (score, percentage, submitted_at, int(consent_given), attempt_id),
+            (score, percentage, final_status, submitted_at, int(consent_given), attempt_id),
         )
 
     return attempt_id
@@ -1109,7 +1354,49 @@ def activity_log_with_details(row: sqlite3.Row | dict) -> dict:
 def quiz_flags(quiz_id: str) -> list[dict]:
     if using_supabase():
         rows = _sort_rows(_sb_select("activity_logs", {"quiz_id": quiz_id}), "created_date", reverse=True)
-        return [activity_log_with_details(row) for row in rows]
+    else:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, quiz_id, attempt_id, event_type, event_description, flag_level, reviewed, created_date
+                FROM activity_logs
+                WHERE quiz_id = ?
+                ORDER BY datetime(created_date) DESC, rowid DESC
+                """,
+                (quiz_id,),
+            ).fetchall()
+    return [activity_log_with_details(row) for row in rows]
+
+
+def sync_quiz_statuses(now: datetime | None = None) -> list[str]:
+    current_time = now or datetime.now()
+    closed_ids: list[str] = []
+
+    if using_supabase():
+        quizzes = _sb_select("quizzes")
+        for quiz in quizzes:
+            if quiz.get("status") != "published":
+                continue
+            end = parse_schedule(quiz.get("scheduled_end"))
+            if end and current_time >= end:
+                _sb_update("quizzes", {"status": "closed"}, {"id": quiz["id"]})
+                closed_ids.append(str(quiz["id"]))
+        return closed_ids
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, scheduled_end
+            FROM quizzes
+            WHERE status = 'published' AND scheduled_end IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            end = parse_schedule(row["scheduled_end"])
+            if end and current_time >= end:
+                connection.execute("UPDATE quizzes SET status = 'closed' WHERE id = ?", (row["id"],))
+                closed_ids.append(str(row["id"]))
+    return closed_ids
 
     with get_connection() as connection:
         rows = connection.execute(
@@ -1127,7 +1414,7 @@ def dashboard_stats() -> dict:
         percentages = [attempt.get("percentage", 0) for attempt in attempts if attempt.get("status") != "in_progress"]
         return {
             "total_quizzes": len(quizzes),
-            "active_quizzes": sum(1 for quiz in quizzes if quiz["status"] == "published"),
+            "active_quizzes": sum(1 for quiz in quizzes if quiz["status"] == "published" and schedule_status(quiz) == "open"),
             "total_submissions": len([attempt for attempt in attempts if attempt.get("status") != "in_progress"]),
             "unreviewed_flags": sum(1 for flag in flags if not flag.get("reviewed")),
             "average_score": round(sum(percentages) / len(percentages), 1) if percentages else 0,
@@ -1142,7 +1429,7 @@ def dashboard_stats() -> dict:
     percentages = [row["percentage"] for row in submission_rows]
     return {
         "total_quizzes": len(quizzes),
-        "active_quizzes": sum(1 for quiz in quizzes if quiz["status"] == "published"),
+        "active_quizzes": sum(1 for quiz in quizzes if quiz["status"] == "published" and schedule_status(quiz) == "open"),
         "total_submissions": len(submission_rows),
         "unreviewed_flags": unreviewed,
         "average_score": round(sum(percentages) / len(percentages), 1) if percentages else 0,
@@ -1177,6 +1464,7 @@ def cheating_summary(quiz_id: str) -> dict:
 
     students = [name for name, _ in student_counter.most_common(3)] or ["No flagged students"]
     pattern_messages = {
+        "alt_tab_attempt": "Alt+Tab attempts suggest the student tried to leave the quiz to look for outside answers.",
         "tab_switch": "Repeated tab switching suggests possible use of outside resources.",
         "window_blur": "Window blur events indicate the student left the exam screen during the attempt.",
         "copy_paste": "Copy or paste attempts suggest content transfer during the assessment.",
@@ -1282,7 +1570,7 @@ def schedule_status(quiz: dict, now: datetime | None = None) -> str:
     end = parse_schedule(quiz.get("scheduled_end"))
     if start and now < start:
         return "upcoming"
-    if end and now > end:
+    if end and now >= end:
         return "closed"
     return "open"
 
@@ -1295,23 +1583,139 @@ def quiz_access_state(quiz: dict, student_id: str | None = None, now: datetime |
     end = parse_schedule(quiz.get("scheduled_end"))
     if start and now < start:
         return False, f"This quiz is scheduled to open on {format_schedule(quiz.get('scheduled_start'))}."
-    if end and now > end:
+    if end and now >= end:
         return False, f"This quiz closed on {format_schedule(quiz.get('scheduled_end'))} and is now locked."
     if student_id:
-        existing_attempt = get_quiz_attempt_for_student_code(quiz["id"], student_id, quiz["quiz_code"])
-        if existing_attempt and existing_attempt.get("status") in {"submitted", "auto_submitted"}:
-            return False, "You have already taken this quiz with the current access code. Ask your instructor to generate a new code to retake it."
+        existing_attempt = get_quiz_attempt_for_student(quiz["id"], student_id)
+        if existing_attempt:
+            if existing_attempt.get("status") in {"submitted", "auto_submitted"}:
+                return False, "You have already completed this quiz."
+            if existing_attempt.get("status") == "in_progress" and attempt_has_expired(quiz, existing_attempt, now):
+                return False, "Your attempt time has ended and the quiz is now locked."
+            if existing_attempt.get("status") == "in_progress":
+                return True, None
+        assigned_section = " ".join(str(quiz.get("assigned_section", "")).split())
+        if assigned_section:
+            student = get_user_by_id(student_id)
+            student_section = " ".join(str((student or {}).get("section_name", "")).split())
+            if _normalize_section_name(student_section) != _normalize_section_name(assigned_section):
+                if student_section:
+                    return False, f"This quiz is only available to {assigned_section}. Your account is enrolled in {student_section}."
+                return False, f"This quiz is only available to {assigned_section}. Your account does not have a section or class assigned yet."
     return True, None
+
+
+def reset_dashboard_data() -> dict[str, int]:
+    if using_supabase():
+        attempts = _sb_select("quiz_attempts")
+        attempt_ids = [str(attempt.get("id", "")).strip() for attempt in attempts if str(attempt.get("id", "")).strip()]
+        responses = _sb_select("student_responses")
+        flags = _sb_select("activity_logs")
+        _sb_delete_many("student_responses", "attempt_id", attempt_ids)
+        for flag in flags:
+            flag_id = str(flag.get("id", "")).strip()
+            if flag_id:
+                _sb_delete("activity_logs", {"id": flag_id})
+        for attempt_id in attempt_ids:
+            _sb_delete("quiz_attempts", {"id": attempt_id})
+        return {
+            "attempts": len(attempt_ids),
+            "responses": len(responses),
+            "activity_logs": len(flags),
+        }
+
+    with get_connection() as connection:
+        attempt_count = connection.execute("SELECT COUNT(*) AS total FROM quiz_attempts").fetchone()["total"]
+        response_count = connection.execute("SELECT COUNT(*) AS total FROM student_responses").fetchone()["total"]
+        flag_count = connection.execute("SELECT COUNT(*) AS total FROM activity_logs").fetchone()["total"]
+        connection.execute("DELETE FROM activity_logs")
+        connection.execute("DELETE FROM student_responses")
+        connection.execute("DELETE FROM quiz_attempts")
+
+    return {
+        "attempts": int(attempt_count),
+        "responses": int(response_count),
+        "activity_logs": int(flag_count),
+    }
+
+
+def _schedule_day_span(quiz: dict) -> tuple[date, date] | None:
+    start = parse_schedule(quiz.get("scheduled_start"))
+    end = parse_schedule(quiz.get("scheduled_end"))
+    if not start and not end:
+        return None
+
+    start_day = (start or end).date()
+    end_day = (end or start).date()
+    if end_day < start_day:
+        start_day, end_day = end_day, start_day
+    return start_day, end_day
+
+
+def _sort_scheduled_quizzes(quizzes: list[dict]) -> list[dict]:
+    return sorted(
+        quizzes,
+        key=lambda quiz: (
+            parse_schedule(quiz.get("scheduled_start"))
+            or parse_schedule(quiz.get("scheduled_end"))
+            or datetime.max,
+            str(quiz.get("title", "")).lower(),
+        ),
+    )
+
+
+def scheduled_quizzes_for_day(day_value: str | date | datetime | None) -> list[dict]:
+    if not day_value:
+        return []
+
+    if isinstance(day_value, datetime):
+        target_day = day_value.date()
+    elif isinstance(day_value, date):
+        target_day = day_value
+    else:
+        try:
+            target_day = datetime.strptime(str(day_value).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return []
+
+    scheduled = []
+    for quiz in get_quizzes():
+        span = _schedule_day_span(quiz)
+        if not span:
+            continue
+        start_day, end_day = span
+        if start_day <= target_day <= end_day:
+            scheduled.append(quiz)
+
+    return _sort_scheduled_quizzes(scheduled)
 
 
 def scheduled_quizzes_by_day(year: int, month: int) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = {}
+    month_start = date(year, month, 1)
+    if month == 12:
+        month_end = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        month_end = date(year, month + 1, 1) - timedelta(days=1)
+
     for quiz in get_quizzes():
-        start = parse_schedule(quiz.get("scheduled_start"))
-        if not start or start.year != year or start.month != month:
+        span = _schedule_day_span(quiz)
+        if not span:
             continue
-        key = start.strftime("%Y-%m-%d")
-        grouped.setdefault(key, []).append(quiz)
+        start_day, end_day = span
+        range_start = max(start_day, month_start)
+        range_end = min(end_day, month_end)
+        if range_end < range_start:
+            continue
+
+        current_day = range_start
+        while current_day <= range_end:
+            key = current_day.strftime("%Y-%m-%d")
+            grouped.setdefault(key, []).append(quiz)
+            current_day += timedelta(days=1)
+
+    for key, quizzes in grouped.items():
+        grouped[key] = _sort_scheduled_quizzes(quizzes)
     return grouped
 
 

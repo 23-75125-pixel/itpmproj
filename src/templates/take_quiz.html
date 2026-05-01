@@ -22,6 +22,9 @@
         <div class="take-result-icon">✓</div>
         <h1>Quiz Completed!</h1>
         <p class="subhead">{{ quiz.title }}</p>
+        {% if attempt.status == "auto_submitted" %}
+        <p class="subhead">Time expired, so your quiz was submitted automatically.</p>
+        {% endif %}
 
         <div class="take-result-score">
             <strong>{{ attempt.percentage }}%</strong>
@@ -54,7 +57,13 @@
         </div>
         <div class="take-timer-chip">
             <span>◷</span>
-            <strong id="countdown-timer">{{ "%02d:00"|format(quiz.time_limit_minutes) }}</strong>
+            <strong id="countdown-timer">
+                {% if remaining_attempt_seconds is none %}
+                No limit
+                {% else %}
+                {{ "%02d:%02d"|format(remaining_attempt_seconds // 60, remaining_attempt_seconds % 60) }}
+                {% endif %}
+            </strong>
         </div>
     </div>
 
@@ -63,6 +72,13 @@
         <button class="nav-chip {% if loop.first %}current{% endif %}" type="button" data-nav-chip>{{ loop.index }}</button>
         {% endfor %}
     </div>
+
+    {% if submission_error %}
+    <div class="schedule-message blocked" style="margin-bottom:1rem;">
+        <strong>Incomplete Quiz</strong>
+        <p>{{ submission_error }}</p>
+    </div>
+    {% endif %}
 
     {% if quiz.monitoring_enabled %}
     <section class="panel" style="margin-bottom:1rem;">
@@ -83,6 +99,7 @@
     {% endif %}
 
     <form id="quiz-submit-form" method="post" class="take-quiz-form">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="quizId" value="{{ quiz.id }}">
         <input type="hidden" name="attempt_id" value="{{ active_attempt_id }}">
         {% if quiz.monitoring_enabled %}
@@ -90,7 +107,7 @@
         {% endif %}
 
         {% for question in quiz.questions %}
-        <article class="panel take-question-card" data-question-card>
+        <article class="panel take-question-card" data-question-card data-question-number="{{ loop.index }}">
             <div class="take-question-top">
                 <span class="take-question-badge">Question {{ loop.index }} of {{ quiz.questions|length }}</span>
                 <span class="take-question-points">{{ question.points }} point{% if question.points != 1 %}s{% endif %}</span>
@@ -99,7 +116,7 @@
             <div class="take-options">
                 {% for option in question.options %}
                 <label class="take-option">
-                    <input type="radio" name="question_{{ question.id }}" value="{{ option }}">
+                    <input type="radio" name="question_{{ question.id }}" value="{{ option }}" {% if submitted_answers.get(question.id) == option %}checked{% endif %}>
                     <span>{{ option }}</span>
                 </label>
                 {% endfor %}
@@ -143,6 +160,7 @@
     <div class="take-modal-card submit-confirm-card">
         <h2>Submit Quiz?</h2>
         <p class="subhead">You have answered <span id="submit-answered-count">0</span> out of {{ quiz.questions|length }} questions.</p>
+        <p id="submit-unanswered-message" class="subhead" hidden></p>
         <div class="take-modal-actions end">
             <button id="review-answers" class="button secondary" type="button">Review Answers</button>
             <button id="confirm-submit" class="button primary" type="button">Submit</button>
@@ -150,7 +168,7 @@
     </div>
 </div>
 
-<script id="quiz-meta" type="application/json">{{ {"totalQuestions": quiz.questions|length, "countdownSecondsStart": quiz.time_limit_minutes * 60, "quizId": quiz.id, "quizCode": quiz.quiz_code}|tojson }}</script>
+<script id="quiz-meta" type="application/json">{{ {"totalQuestions": quiz.questions|length, "countdownSecondsStart": remaining_attempt_seconds, "quizId": quiz.id, "quizCode": quiz.quiz_code}|tojson }}</script>
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
@@ -161,20 +179,113 @@ document.addEventListener("DOMContentLoaded", () => {
     const confirmSubmit = document.getElementById("confirm-submit");
     const answeredLabel = document.getElementById("answered-label");
     const submitAnsweredCount = document.getElementById("submit-answered-count");
+    const submitUnansweredMessage = document.getElementById("submit-unanswered-message");
     const timer = document.getElementById("countdown-timer");
     const quizMeta = JSON.parse(document.getElementById("quiz-meta").textContent);
+    const questionCards = Array.from(document.querySelectorAll("[data-question-card]"));
     const totalQuestions = quizMeta.totalQuestions;
-    const countdownSecondsStart = quizMeta.countdownSecondsStart;
-    let countdownSeconds = countdownSecondsStart;
+    const countdownSecondsStart = Number.isFinite(quizMeta.countdownSecondsStart)
+        ? quizMeta.countdownSecondsStart
+        : null;
+    const countdownStartedAtMs = Date.now();
+    let submissionLocked = false;
+
+    function lockSubmissionUi() {
+        if (openSubmitModal) {
+            openSubmitModal.disabled = true;
+            openSubmitModal.textContent = "Submitting...";
+        }
+        if (confirmSubmit) {
+            confirmSubmit.disabled = true;
+            confirmSubmit.textContent = "Submitting...";
+        }
+        if (submitModal) {
+            submitModal.hidden = true;
+        }
+        document.body.classList.remove("modal-open");
+    }
+
+    function prepareForSubmit() {
+        if (!form || submissionLocked) {
+            return false;
+        }
+        submissionLocked = true;
+        lockSubmissionUi();
+        form.dispatchEvent(new CustomEvent("quiz:before-submit"));
+        return true;
+    }
+
+    function submitQuiz() {
+        const unansweredCards = getUnansweredCards();
+        if (unansweredCards.length) {
+            updateSubmitReadiness(unansweredCards);
+            focusFirstUnanswered(unansweredCards[0]);
+            return;
+        }
+        if (!prepareForSubmit()) {
+            return;
+        }
+        if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+            return;
+        }
+        form.submit();
+    }
+
+    function getUnansweredCards() {
+        return questionCards.filter((card) => !card.querySelector(".take-option input:checked"));
+    }
+
+    function focusFirstUnanswered(card) {
+        if (!card) {
+            return;
+        }
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        const firstInput = card.querySelector(".take-option input");
+        if (firstInput) {
+            firstInput.focus();
+        }
+    }
+
+    function updateSubmitReadiness(unansweredCards = getUnansweredCards()) {
+        const unansweredNumbers = unansweredCards
+            .map((card) => card.dataset.questionNumber)
+            .filter(Boolean);
+        const hasUnanswered = unansweredNumbers.length > 0;
+
+        if (confirmSubmit) {
+            confirmSubmit.disabled = hasUnanswered;
+        }
+
+        if (!submitUnansweredMessage) {
+            return;
+        }
+
+        if (!hasUnanswered) {
+            submitUnansweredMessage.hidden = true;
+            submitUnansweredMessage.textContent = "";
+            return;
+        }
+
+        const label = unansweredNumbers.length === 1 ? "question" : "questions";
+        submitUnansweredMessage.hidden = false;
+        submitUnansweredMessage.textContent = `Answer ${label} ${unansweredNumbers.join(", ")} before submitting.`;
+    }
 
     function updateAnsweredCount() {
         const answered = document.querySelectorAll(".take-option input:checked").length;
+        document.querySelectorAll(".take-options").forEach((group) => {
+            group.querySelectorAll(".take-option").forEach((item) => {
+                item.classList.toggle("selected", Boolean(item.querySelector("input:checked")));
+            });
+        });
         if (answeredLabel) {
             answeredLabel.textContent = `${answered}/${totalQuestions} answered`;
         }
         if (submitAnsweredCount) {
             submitAnsweredCount.textContent = answered;
         }
+        updateSubmitReadiness();
     }
 
     document.querySelectorAll(".take-option input").forEach((input) => {
@@ -192,6 +303,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (openSubmitModal && submitModal) {
         openSubmitModal.addEventListener("click", () => {
             updateAnsweredCount();
+            updateSubmitReadiness();
             submitModal.hidden = false;
             document.body.classList.add("modal-open");
         });
@@ -206,24 +318,44 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (confirmSubmit && form) {
         confirmSubmit.addEventListener("click", () => {
-            form.dispatchEvent(new CustomEvent("quiz:before-submit"));
-            form.submit();
+            submitQuiz();
         });
     }
 
-    if (timer) {
+    if (form) {
+        form.addEventListener("submit", (event) => {
+            const unansweredCards = getUnansweredCards();
+            if (unansweredCards.length) {
+                event.preventDefault();
+                updateAnsweredCount();
+                if (submitModal) {
+                    submitModal.hidden = false;
+                    document.body.classList.add("modal-open");
+                }
+                focusFirstUnanswered(unansweredCards[0]);
+                return;
+            }
+            if (!submissionLocked) {
+                prepareForSubmit();
+            }
+        });
+    }
+
+    if (timer && countdownSecondsStart !== null) {
         const tick = () => {
+            const elapsedSeconds = Math.max(0, Math.floor((Date.now() - countdownStartedAtMs) / 1000));
+            const countdownSeconds = Math.max(0, countdownSecondsStart - elapsedSeconds);
             const minutes = String(Math.floor(countdownSeconds / 60)).padStart(2, "0");
             const seconds = String(countdownSeconds % 60).padStart(2, "0");
             timer.textContent = `${minutes}:${seconds}`;
             timer.classList.toggle("warning", countdownSeconds <= 300 && countdownSeconds > 120);
             timer.classList.toggle("danger", countdownSeconds <= 120);
             if (countdownSeconds <= 0) {
-                form.dispatchEvent(new CustomEvent("quiz:before-submit"));
-                form.submit();
+                if (prepareForSubmit()) {
+                    form.submit();
+                }
                 return;
             }
-            countdownSeconds -= 1;
             window.setTimeout(tick, 1000);
         };
         tick();
@@ -287,8 +419,10 @@ document.addEventListener("DOMContentLoaded", () => {
     let detectionTimer = null;
     let detectionInFlight = false;
     let cameraActive = false;
+    let monitorSignalsActive = true;
     const pendingMonitorReports = [];
     const pendingWebrtcOffers = [];
+    const monitorEventCooldowns = new Map();
     const DETECTION_INTERVAL_MS = 900;
     const DETECTION_MAX_FRAME_WIDTH = 960;
     const captureCanvas = document.createElement("canvas");
@@ -310,14 +444,72 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function reportMonitorIssue(message, level = "medium", code = "camera_status") {
-        if (!message) return;
+    function reportMonitorIssue(message, level = "medium", code = "camera_status", cooldownMs = 0) {
+        if (!message || !monitorSignalsActive) return;
+        if (cooldownMs > 0) {
+            const cacheKey = `${code}:${message}`;
+            const now = Date.now();
+            const previous = monitorEventCooldowns.get(cacheKey) || 0;
+            if ((now - previous) < cooldownMs) {
+                return;
+            }
+            monitorEventCooldowns.set(cacheKey, now);
+        }
         const payload = { quizId, attemptId, message, level, code };
         if (socket && socket.connected) {
             socket.emit("monitor_status_report", payload);
             return;
         }
         pendingMonitorReports.push(payload);
+    }
+
+    function setupIntegritySignals() {
+        const reportFocusSignal = (message, level, code, cooldownMs) => {
+            reportMonitorIssue(message, level, code, cooldownMs);
+        };
+
+        document.addEventListener("visibilitychange", () => {
+            if (!monitorSignalsActive || !document.hidden) {
+                return;
+            }
+            setStatus("quiz tab hidden");
+            reportFocusSignal(
+                "Student switched away from the quiz tab or minimized the quiz window during the exam.",
+                "high",
+                "tab_switch",
+                5000,
+            );
+        });
+
+        window.addEventListener("blur", () => {
+            if (!monitorSignalsActive || document.hidden) {
+                return;
+            }
+            setStatus("quiz window lost focus");
+            reportFocusSignal(
+                "Quiz window lost focus, which may indicate app switching or opening another resource.",
+                "medium",
+                "window_blur",
+                5000,
+            );
+        });
+
+        document.addEventListener("keydown", (event) => {
+            if (!monitorSignalsActive) {
+                return;
+            }
+            const pressedAltTab = event.altKey && (event.key === "Tab" || event.code === "Tab");
+            if (!pressedAltTab) {
+                return;
+            }
+            setStatus("alt+tab attempt detected");
+            reportFocusSignal(
+                "Student pressed Alt+Tab while taking the quiz, which may indicate an attempt to search for answers outside the exam.",
+                "high",
+                "alt_tab_attempt",
+                3500,
+            );
+        });
     }
 
     function clearDetections() {
@@ -517,7 +709,10 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             const response = await fetch("{{ url_for('detect_face') }}", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRF-Token": window.semcdsCsrfToken || "",
+                },
                 body: JSON.stringify({
                     image: captureCanvas.toDataURL("image/jpeg", 0.82),
                     quizId,
@@ -622,6 +817,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function stopCameraMonitoring(disconnectSocket = false) {
+        if (disconnectSocket) {
+            monitorSignalsActive = false;
+        }
         cameraActive = false;
         pendingWebrtcOffers.length = 0;
         if (detectionTimer) {
@@ -655,6 +853,9 @@ document.addEventListener("DOMContentLoaded", () => {
         clearDetections();
         detectionInFlight = false;
     }
+
+    setupIntegritySignals();
+    ensureSocket();
 
     if (!consentModal) {
         startCameraMonitoring();

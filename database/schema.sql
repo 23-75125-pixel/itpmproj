@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) NOT NULL UNIQUE,
     full_name VARCHAR(255) NOT NULL,
     role VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'user')),
+    section_name VARCHAR(255) NOT NULL DEFAULT '',
+    avatar_url TEXT NOT NULL DEFAULT '',
     password_hash TEXT NOT NULL,
     created_at DATETIME NOT NULL
 );
@@ -17,6 +19,7 @@ CREATE TABLE IF NOT EXISTS quizzes (
     status VARCHAR(20) NOT NULL CHECK (status IN ('draft', 'published', 'closed')),
     quiz_code VARCHAR(50) NOT NULL UNIQUE,
     monitoring_enabled BOOLEAN NOT NULL DEFAULT 0,
+    assigned_section VARCHAR(255) NOT NULL DEFAULT '',
     scheduled_start DATETIME,
     scheduled_end DATETIME,
     created_at DATETIME NOT NULL,

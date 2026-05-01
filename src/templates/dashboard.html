@@ -10,11 +10,25 @@
             <h1 class="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900 mb-2">Instructor Dashboard</h1>
             <p class="text-gray-600">Smart Exam Management &amp; Cheating Detection System</p>
         </div>
-        <a href="{{ url_for('create_quiz') }}" class="inline-flex justify-center px-6 py-3 bg-rose-700 hover:bg-rose-800 text-white font-semibold rounded-lg transition shadow-md w-full sm:w-auto">
-            + New Quiz
-        </a>
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <form method="post" action="{{ url_for('dashboard_reset_data') }}" class="w-full sm:w-auto" data-swal-confirm data-swal-title="Reset dashboard data?" data-swal-text="This will clear quiz attempts, student responses, and activity logs. Quizzes and user accounts will remain." data-swal-icon="warning" data-swal-confirm-text="Yes, reset data" data-swal-cancel-text="Cancel">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="inline-flex justify-center px-6 py-3 border border-rose-200 bg-white text-rose-800 font-semibold rounded-lg transition shadow-sm hover:bg-rose-50 w-full sm:w-auto">
+                    Reset Dashboard Data
+                </button>
+            </form>
+            <a href="{{ url_for('create_quiz') }}" class="inline-flex justify-center px-6 py-3 bg-rose-700 hover:bg-rose-800 text-white font-semibold rounded-lg transition shadow-md w-full sm:w-auto">
+                + New Quiz
+            </a>
+        </div>
     </div>
 </div>
+
+{% if message %}
+<section class="manager-banner">
+    <div class="schedule-message success-message" data-swal-message data-swal-icon="success" data-swal-title="Success">{{ message }}</div>
+</section>
+{% endif %}
 <!-- Stats Grid -->
 <div class="grid md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8 instructor-stats-grid">
     <div class="bg-white rounded-xl p-6 border border-gray-200 shadow-sm hover:shadow-md transition">
@@ -118,7 +132,7 @@
                 </div>
             </div>
             <div class="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-2 py-1.5">
-                <strong class="min-w-[130px] text-center text-sm text-gray-700">{{ calendar_month }}</strong>
+                <strong id="calendar-month-label" class="min-w-[130px] text-center text-sm text-gray-700">{{ calendar_month }}</strong>
                 <button id="open-calendar-chooser" type="button" class="ml-1 inline-flex items-center rounded-lg bg-rose-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-800 transition">Date Chooser</button>
             </div>
         </div>
@@ -132,22 +146,27 @@
             </div>
         </div>
 
-        <div class="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4 instructor-day-panel">
-            <strong class="text-gray-900">{{ selected_day or calendar_month }}</strong>
+        <div id="selected-day-panel" class="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4 instructor-day-panel" data-selected-day="{{ selected_day }}" data-month-key="{{ calendar_month_key }}">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <strong id="selected-day-heading" class="text-gray-900">{{ selected_day_label or calendar_month }}</strong>
+                <span id="selected-day-updated" class="text-xs text-gray-500">{% if selected_day_checked_at %}Updated {{ selected_day_checked_at }}{% endif %}</span>
+            </div>
             {% if selected_day_quizzes %}
-            <div class="mt-3 space-y-3 instructor-day-list">
+            <div id="selected-day-list" class="mt-3 space-y-3 instructor-day-list">
                 {% for quiz in selected_day_quizzes %}
                 <div class="flex items-start justify-between gap-3 rounded-lg bg-white border border-gray-200 p-3">
                     <div>
                         <strong class="text-sm text-gray-900">{{ quiz.title }}</strong>
                         <p class="text-xs sm:text-sm text-gray-600 mt-1">{{ format_schedule(quiz.scheduled_start) }} to {{ format_schedule(quiz.scheduled_end) }}</p>
                     </div>
-                    <span class="text-xs font-semibold px-2.5 py-1 rounded-full {% if schedule_status(quiz) == 'active' %}bg-green-100 text-green-700{% elif schedule_status(quiz) == 'upcoming' %}bg-amber-100 text-amber-700{% else %}bg-gray-200 text-gray-700{% endif %}">{{ schedule_status(quiz) }}</span>
+                    <span class="text-xs font-semibold px-2.5 py-1 rounded-full {% if schedule_status(quiz) == 'open' %}bg-green-100 text-green-700{% elif schedule_status(quiz) == 'upcoming' %}bg-amber-100 text-amber-700{% else %}bg-gray-200 text-gray-700{% endif %}">{{ schedule_status(quiz) }}</span>
                 </div>
                 {% endfor %}
             </div>
+            <p id="selected-day-empty" class="mt-2 text-sm text-gray-500" hidden>No quizzes scheduled</p>
             {% else %}
-            <p class="mt-2 text-sm text-gray-500">No quizzes scheduled</p>
+            <div id="selected-day-list" class="mt-3 space-y-3 instructor-day-list" hidden></div>
+            <p id="selected-day-empty" class="mt-2 text-sm text-gray-500">No quizzes scheduled</p>
             {% endif %}
         </div>
     </article>
@@ -231,7 +250,7 @@
                 <h3 class="text-lg font-bold text-gray-900 leading-tight">{{ quiz.title }}</h3>
                 <p class="text-sm text-gray-500">{{ quiz.subject }}</p>
             </div>
-            <span class="text-xs font-semibold px-2.5 py-1 rounded-full {% if quiz.status == 'active' %}bg-green-100 text-green-700{% elif quiz.status == 'upcoming' %}bg-amber-100 text-amber-700{% else %}bg-gray-200 text-gray-700{% endif %}">{{ quiz.status }}</span>
+            <span class="text-xs font-semibold px-2.5 py-1 rounded-full {% if quiz.status == 'published' %}bg-green-100 text-green-700{% elif quiz.status == 'draft' %}bg-amber-100 text-amber-700{% else %}bg-gray-200 text-gray-700{% endif %}">{{ quiz.status }}</span>
         </div>
         <p class="text-sm text-gray-600 mb-4 line-clamp-2">{{ quiz.description }}</p>
         <div class="flex flex-wrap gap-2 text-xs text-gray-600 mb-4">
@@ -295,8 +314,83 @@ document.addEventListener("DOMContentLoaded", () => {
     const applyChooserButton = document.getElementById("apply-calendar-chooser");
     const chooserModal = document.getElementById("calendar-chooser-modal");
     const dateInput = document.getElementById("dashboard-date-picker");
-    const selectedDay = "{{ selected_day or '' }}";
-    const monthKey = "{{ calendar_month_key }}";
+    const calendarMonthLabel = document.getElementById("calendar-month-label");
+    const selectedDayPanel = document.getElementById("selected-day-panel");
+    const selectedDayHeading = document.getElementById("selected-day-heading");
+    const selectedDayUpdated = document.getElementById("selected-day-updated");
+    const selectedDayList = document.getElementById("selected-day-list");
+    const selectedDayEmpty = document.getElementById("selected-day-empty");
+    let selectedDay = selectedDayPanel?.dataset.selectedDay || "";
+    let monthKey = selectedDayPanel?.dataset.monthKey || "{{ calendar_month_key }}";
+    const applyChooserButtonLabel = applyChooserButton ? applyChooserButton.textContent : "";
+
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#39;");
+    }
+
+    function statusClasses(status) {
+        if (status === "open") return "bg-green-100 text-green-700";
+        if (status === "upcoming") return "bg-amber-100 text-amber-700";
+        return "bg-gray-200 text-gray-700";
+    }
+
+    function renderSelectedDaySchedule(payload) {
+        if (!payload || !selectedDayHeading || !selectedDayList || !selectedDayEmpty) {
+            return;
+        }
+
+        selectedDay = payload.day || "";
+        monthKey = payload.month || monthKey;
+        if (selectedDayPanel) {
+            selectedDayPanel.dataset.selectedDay = selectedDay;
+            selectedDayPanel.dataset.monthKey = monthKey;
+        }
+        if (calendarMonthLabel && payload.month_label) {
+            calendarMonthLabel.textContent = payload.month_label;
+        }
+
+        selectedDayHeading.textContent = payload.day_label || payload.month_label || "Exam Schedule";
+        if (selectedDayUpdated) {
+            selectedDayUpdated.textContent = payload.checked_at ? `Updated ${payload.checked_at}` : "";
+        }
+
+        const quizzes = Array.isArray(payload.quizzes) ? payload.quizzes : [];
+        if (!quizzes.length) {
+            selectedDayList.hidden = true;
+            selectedDayList.innerHTML = "";
+            selectedDayEmpty.hidden = false;
+            return;
+        }
+
+        selectedDayList.innerHTML = quizzes.map((quiz) => `
+            <div class="flex items-start justify-between gap-3 rounded-lg bg-white border border-gray-200 p-3">
+                <div>
+                    <strong class="text-sm text-gray-900">${escapeHtml(quiz.title || "Untitled Quiz")}</strong>
+                    <p class="text-xs sm:text-sm text-gray-600 mt-1">${escapeHtml(quiz.scheduled_start_label || "Not scheduled")} to ${escapeHtml(quiz.scheduled_end_label || "Not scheduled")}</p>
+                </div>
+                <span class="text-xs font-semibold px-2.5 py-1 rounded-full ${statusClasses(quiz.status)}">${escapeHtml(quiz.status || "open")}</span>
+            </div>
+        `).join("");
+        selectedDayList.hidden = false;
+        selectedDayEmpty.hidden = true;
+    }
+
+    async function fetchSelectedDaySchedule(dayValue) {
+        const response = await fetch(`/api/dashboard/schedule?day=${encodeURIComponent(dayValue)}`, {
+            headers: {
+                "Accept": "application/json",
+            },
+        });
+        if (!response.ok) {
+            throw new Error("Schedule lookup failed.");
+        }
+        return response.json();
+    }
 
     function closeChooser() {
         if (!chooserModal) return;
@@ -314,15 +408,32 @@ document.addEventListener("DOMContentLoaded", () => {
         dateInput.focus();
     }
 
-    function applyChooser() {
+    async function applyChooser() {
         if (!dateInput || !dateInput.value) return;
-        const selected = new Date(`${dateInput.value}T00:00:00`);
-        if (Number.isNaN(selected.getTime())) return;
-        const month = `${selected.getFullYear()}-${String(selected.getMonth() + 1).padStart(2, "0")}`;
-        const params = new URLSearchParams(window.location.search);
-        params.set("month", month);
-        params.set("day", dateInput.value);
-        window.location.href = `${window.location.pathname}?${params.toString()}`;
+        const requestedDay = dateInput.value;
+        if (applyChooserButton) {
+            applyChooserButton.disabled = true;
+            applyChooserButton.textContent = "Loading...";
+        }
+        try {
+            const payload = await fetchSelectedDaySchedule(requestedDay);
+            renderSelectedDaySchedule(payload);
+            const params = new URLSearchParams(window.location.search);
+            params.set("month", payload.month || requestedDay.slice(0, 7));
+            params.set("day", payload.day || requestedDay);
+            window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+            closeChooser();
+        } catch (_) {
+            const params = new URLSearchParams(window.location.search);
+            params.set("month", requestedDay.slice(0, 7));
+            params.set("day", requestedDay);
+            window.location.href = `${window.location.pathname}?${params.toString()}`;
+        } finally {
+            if (applyChooserButton) {
+                applyChooserButton.disabled = false;
+                applyChooserButton.textContent = applyChooserButtonLabel;
+            }
+        }
     }
 
     if (openChooserButton) {
@@ -336,6 +447,14 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (applyChooserButton) {
         applyChooserButton.addEventListener("click", applyChooser);
+    }
+    if (dateInput) {
+        dateInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                applyChooser();
+            }
+        });
     }
     if (chooserModal) {
         chooserModal.addEventListener("click", (event) => {

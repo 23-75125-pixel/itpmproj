@@ -15,10 +15,17 @@
             <button class="button primary join-submit" type="submit">Find and Join Quiz</button>
         </form>
 
+        {% if lookup_message %}
+        <div class="schedule-message blocked">{{ lookup_message }}</div>
+        {% endif %}
+
         {% if quiz %}
         <div class="join-result-card">
             <strong>{{ quiz.title }}</strong>
             <p>{{ quiz.subject }} &middot; {{ quiz.time_limit_minutes }} mins &middot; Monitoring {{ 'On' if quiz.monitoring_enabled else 'Off' }}</p>
+            {% if quiz.assigned_section %}
+            <p>Section / Class: {{ quiz.assigned_section }}</p>
+            {% endif %}
             <p>Opens: {{ format_schedule(quiz.scheduled_start) }}</p>
             <p>Closes: {{ format_schedule(quiz.scheduled_end) }}</p>
             <span class="status-pill {{ schedule_status(quiz) }}">{{ schedule_status(quiz) }}</span>
