@@ -42,9 +42,9 @@
     <script defer src="{{ url_for('static', filename='js/sweetalert-helpers.js') }}"></script>
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-50 text-gray-900 min-h-screen {% if current_role %}app-layout overflow-hidden{% endif %}">
+<body class="bg-gray-50 text-gray-900 min-h-screen {% if current_role %}app-layout{% endif %}">
     {% if current_role %}
-    <div class="app-shell relative flex min-h-screen lg:h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-white to-rose-50/40">
+    <div class="app-shell relative flex min-h-screen lg:h-screen bg-gradient-to-br from-slate-50 via-white to-rose-50/40">
         <div id="mobile-sidebar-overlay" class="fixed inset-0 z-40 bg-slate-900/55 hidden lg:hidden" aria-hidden="true"></div>
 
         <aside id="app-sidebar" class="app-sidebar w-72 shrink-0 bg-white/95 backdrop-blur border-r border-gray-200 flex flex-col overflow-hidden fixed inset-y-0 left-0 z-50 transform -translate-x-full transition-transform duration-200 ease-out lg:translate-x-0 lg:z-20">
@@ -195,7 +195,7 @@
             </div>
         </aside>
 
-        <main class="app-main relative flex-1 min-w-0 flex flex-col overflow-hidden">
+        <main class="app-main relative flex-1 min-w-0 flex flex-col">
             <div class="sticky top-0 z-30 border-b border-gray-200 bg-white/95 backdrop-blur px-4 py-3 lg:hidden">
                 <div class="flex items-center justify-between gap-3">
                     <button id="mobile-sidebar-toggle" type="button" class="inline-flex items-center justify-center rounded-lg border border-gray-200 p-2.5 text-gray-700 hover:bg-gray-100" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
@@ -228,7 +228,7 @@
                     </div>
                 </div>
             </div>
-            <section id="app-content-scroll" class="app-content-scroll flex-1 overflow-y-auto overscroll-contain">
+            <section id="app-content-scroll" class="app-content-scroll flex-1 lg:overflow-y-auto overscroll-contain">
                 <div class="app-content-container mx-auto w-full p-4 sm:p-6 lg:p-8">
                     {% block content %}{% endblock %}
                 </div>
@@ -246,8 +246,9 @@
         function setOpen(isOpen) {
             sidebar.classList.toggle("-translate-x-full", !isOpen);
             overlay.classList.toggle("hidden", !isOpen);
+            overlay.setAttribute("aria-hidden", isOpen ? "false" : "true");
             toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
-            document.body.classList.toggle("overflow-hidden", isOpen);
+            document.body.classList.toggle("mobile-nav-open", isOpen);
         }
 
         toggle.addEventListener("click", () => {
@@ -276,6 +277,8 @@
                 setOpen(false);
             }
         });
+
+        setOpen(false);
     });
     </script>
     {% else %}

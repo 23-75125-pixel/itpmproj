@@ -247,6 +247,29 @@ def test_login_page_renders_accessible_password_toggle(tmp_path, monkeypatch):
     assert "data-password-icon-hide" in html
 
 
+def test_authenticated_layout_uses_mobile_sidebar_scroll_lock_instead_of_global_overflow_hidden(tmp_path, monkeypatch):
+    app = build_app(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    login_response = login(
+        client,
+        role="admin",
+        email=ADMIN_EMAIL,
+        password=ADMIN_PASSWORD,
+    )
+
+    assert login_response.status_code == 302
+
+    response = client.get("/dashboard")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "app-layout overflow-hidden" not in html
+    assert 'document.body.classList.toggle("mobile-nav-open", isOpen);' in html
+    assert 'document.body.classList.toggle("overflow-hidden", isOpen);' not in html
+    assert 'class="app-content-scroll flex-1 lg:overflow-y-auto overscroll-contain"' in html
+
+
 def test_env_loader_uses_dotenv_without_overwriting_existing_env(tmp_path, monkeypatch):
     env_path = tmp_path / ".env"
     env_path.write_text("SMTP_HOST=smtp.env.example\nSMTP_PORT=2525\n", encoding="utf-8")

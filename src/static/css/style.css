@@ -4349,11 +4349,16 @@ body.app-layout {
         overflow: auto;
     }
 
+    body.mobile-nav-open {
+        overflow: hidden;
+    }
+
     .app-shell {
         display: flex;
         height: auto;
         min-height: 100vh;
         min-height: 100dvh;
+        overflow: visible;
     }
 
     .app-main {
@@ -4368,6 +4373,7 @@ body.app-layout {
     .app-content-scroll {
         height: auto;
         overflow: visible;
+        overscroll-behavior: auto;
     }
 
     .app-content-container {
